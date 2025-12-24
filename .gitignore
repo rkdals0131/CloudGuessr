@@ -1,0 +1,62 @@
+# Build artifacts
+build/
+install/
+log/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Compiled Object files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# ROS2 specific
+*.pyc
+__pycache__/
+*.egg-info/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependency directories
+node_modules/
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# Python virtual environments
+venv/
+env/
+.env
+
+# Colcon specific
+COLCON_IGNORE
+
+# Point cloud data files
+data/

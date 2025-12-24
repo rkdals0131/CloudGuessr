@@ -1,0 +1,31 @@
+# CloudGuessr Default Configuration
+
+# Map files
+map_file_vis: "data/campus_q32.pcd"      # For RViz display (lower res)
+map_file_score: "data/campus_q8.pcd"     # For scoring (higher res)
+map_frame: "map"
+publish_latched: true
+
+# Rounds
+rounds_dir: "data/rounds"
+
+# ROI settings
+roi_radius_m_default: 20.0
+
+# Yaw sweep candidates (degrees)
+yaw_candidates_deg: [0, 45, 90, 135, 180, 225, 270, 315]
+
+# Preprocessing
+voxel_size_score: 0.5   # meters
+
+# ICP settings
+icp_max_iter: 50
+icp_max_corr_dist: 2.0  # meters
+
+# Failure thresholds
+fail_min_fitness: 0.3
+fail_max_rmse: 2.0
+
+# Debounce/timeout (milliseconds)
+click_debounce_ms: 300
+score_timeout_ms: 3000
