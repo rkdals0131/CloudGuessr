@@ -19,6 +19,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters registration)
 find_package(yaml-cpp REQUIRED)
+find_package(nlohmann_json 3.2.0 REQUIRED)
 
 # Include directories
 include_directories(
@@ -51,6 +52,31 @@ ament_target_dependencies(cloudguessr_backend
   rclcpp
   std_msgs
   sensor_msgs
+)
+
+# =============================================================================
+# Nodes
+# =============================================================================
+add_executable(map_server_node src/nodes/map_server_node.cpp)
+target_link_libraries(map_server_node cloudguessr_backend)
+ament_target_dependencies(map_server_node
+  rclcpp
+  sensor_msgs
+  pcl_conversions
+)
+
+add_executable(round_manager_node src/nodes/round_manager_node.cpp)
+target_link_libraries(round_manager_node
+  cloudguessr_backend
+  nlohmann_json::nlohmann_json
+)
+ament_target_dependencies(round_manager_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  visualization_msgs
+  pcl_conversions
 )
 
 # =============================================================================
@@ -95,6 +121,12 @@ install(TARGETS cloudguessr_backend
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
+)
+
+install(TARGETS
+  map_server_node
+  round_manager_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY include/

@@ -1,0 +1,8 @@
+difficulty: easy
+gt_pose_in_map:
+  x: 10.0
+  y: 5.0
+  z: 0.5
+notes: Test round
+roi_radius: 8.0
+round_id: 1
