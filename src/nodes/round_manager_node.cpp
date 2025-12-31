@@ -10,6 +10,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/common/transforms.h>
 
 #include "cloudguessr/backend/io.hpp"
 #include "cloudguessr/backend/preprocess.hpp"
@@ -83,12 +84,24 @@ public:
     result_pub_ = this->create_publisher<std_msgs::msg::String>("/cloudguessr/result", 10);
     marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/cloudguessr/markers", 10);
     status_pub_ = this->create_publisher<std_msgs::msg::String>("/cloudguessr/status", 10);
-    query_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloudguessr/query", 10);
+    hmi_log_pub_ = this->create_publisher<std_msgs::msg::String>("/cloudguessr/hmi_log", 10);
 
-    // Subscriber
+    // Query publisher with transient_local QoS (late subscribers receive last message)
+    rclcpp::QoS query_qos(1);
+    query_qos.transient_local();
+    query_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloudguessr/query", query_qos);
+
+    // Aligned query publisher (ICP 정합 결과 시각화용)
+    aligned_query_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloudguessr/aligned_query", 10);
+
+    // Subscribers
     click_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
       "/clicked_point", 10,
       std::bind(&RoundManagerNode::onClickedPoint, this, std::placeholders::_1));
+
+    viewer_ready_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/cloudguessr/viewer_ready", 10,
+      std::bind(&RoundManagerNode::onViewerReady, this, std::placeholders::_1));
 
     // Timer for status updates
     status_timer_ = this->create_wall_timer(
@@ -96,6 +109,7 @@ public:
       std::bind(&RoundManagerNode::publishStatus, this));
 
     RCLCPP_INFO(this->get_logger(), "========================================");
+    hmiLog("CloudGuessr 게임을 시작합니다!");
 
     // Start first round
     loadRound(0);
@@ -133,6 +147,7 @@ private:
     RCLCPP_INFO(this->get_logger(), "│     라운드 %zu/%zu 시작                │",
       idx + 1, round_dirs_.size());
     RCLCPP_INFO(this->get_logger(), "└──────────────────────────────────────┘");
+    hmiLog("===== 라운드 " + std::to_string(idx + 1) + "/" + std::to_string(round_dirs_.size()) + " 시작 =====");
 
     // Load metadata
     std::string yaml_path = cloudguessr::round_dataset::getRoundYamlPath(round_dir);
@@ -168,6 +183,8 @@ private:
     RCLCPP_INFO(this->get_logger(), "▶ RViz에서 맵을 클릭하여 위치를 추측하세요");
     RCLCPP_INFO(this->get_logger(), "  (상단 Publish Point 도구 사용)");
     RCLCPP_INFO(this->get_logger(), "");
+    hmiLog("난이도: " + diff_kr + " | Query: " + std::to_string(current_query_original_->size()) + "개 포인트");
+    hmiLog("Open3D에서 Query를 관찰하고 RViz에서 위치를 클릭하세요!");
 
     state_ = GameState::WAITING_CLICK;
     clearMarkers();
@@ -183,6 +200,31 @@ private:
     query_msg.header.frame_id = "query";
     query_msg.header.stamp = this->now();
     query_pub_->publish(query_msg);
+    RCLCPP_INFO(this->get_logger(), "[Query 발행] %zu 포인트", current_query_original_->size());
+  }
+
+  void onViewerReady(const std_msgs::msg::String::SharedPtr /*msg*/)
+  {
+    RCLCPP_INFO(this->get_logger(), "[Viewer Ready] Query 재발행");
+    publishQuery();
+  }
+
+  void publishAlignedQuery(const Eigen::Matrix4f& transform)
+  {
+    if (!current_query_original_) return;
+
+    // Apply ICP transform to query cloud
+    cloudguessr::PointCloudPtr aligned_cloud(new cloudguessr::PointCloud);
+    pcl::transformPointCloud(*current_query_original_, *aligned_cloud, transform);
+
+    // Publish as PointCloud2 (in map frame for RViz visualization)
+    sensor_msgs::msg::PointCloud2 aligned_msg;
+    pcl::toROSMsg(*aligned_cloud, aligned_msg);
+    aligned_msg.header.frame_id = "map";
+    aligned_msg.header.stamp = this->now();
+    aligned_query_pub_->publish(aligned_msg);
+
+    RCLCPP_INFO(this->get_logger(), "[시각화] 정합된 Query 발행: %zu 포인트", aligned_cloud->size());
   }
 
   void onClickedPoint(const geometry_msgs::msg::PointStamped::SharedPtr msg)
@@ -210,6 +252,11 @@ private:
     RCLCPP_INFO(this->get_logger(), "[클릭 수신] 위치: (%.1f, %.1f, %.1f)", clicked_x, clicked_y, clicked_z);
     RCLCPP_INFO(this->get_logger(), "[채점 중] ICP 정합 수행 중...");
 
+    char buf[128];
+    snprintf(buf, sizeof(buf), "클릭 위치: (%.1f, %.1f, %.1f)", clicked_x, clicked_y, clicked_z);
+    hmiLog(buf);
+    hmiLog("채점 중... ICP 정합 수행 중...");
+
     // Run scoring pipeline
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -236,7 +283,12 @@ private:
     auto end = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
 
-    // 4. Classify and score
+    // 4. Calculate distance error first (primary scoring factor)
+    std::vector<double> clicked = {clicked_x, clicked_y, clicked_z};
+    std::vector<double> gt = {current_meta_.gt_x, current_meta_.gt_y, current_meta_.gt_z};
+    double dist_error = cloudguessr::scoring::calculateDistanceError(clicked, gt);
+
+    // 5. Classify result (for FAIL detection) and compute distance-based score
     auto score_result = cloudguessr::scoring::classifyResult(
       sweep_result.best_alignment.fitness,
       sweep_result.best_alignment.rmse,
@@ -246,12 +298,16 @@ private:
       fail_min_fitness_,
       fail_max_rmse_);
 
-    // 5. Calculate distance error
-    std::vector<double> clicked = {clicked_x, clicked_y, clicked_z};
-    std::vector<double> gt = {current_meta_.gt_x, current_meta_.gt_y, current_meta_.gt_z};
-    double dist_error = cloudguessr::scoring::calculateDistanceError(clicked, gt);
+    // Override score with distance-based calculation (if not FAIL)
+    if (score_result.status == "OK") {
+      score_result.score = cloudguessr::scoring::computeScoreFromDistance(
+        dist_error, sweep_result.best_alignment.fitness);
+    }
 
-    // 6. Publish results
+    // 6. Publish aligned query for visualization
+    publishAlignedQuery(sweep_result.best_alignment.transform);
+
+    // 7. Publish results
     publishResults(score_result, sweep_result, clicked, gt, dist_error, elapsed_ms);
 
     state_ = GameState::SHOWING_RESULT;
@@ -316,22 +372,36 @@ private:
     RCLCPP_INFO(this->get_logger(), "║  처리 시간: %.0f ms                   ║", elapsed_ms);
     RCLCPP_INFO(this->get_logger(), "╚══════════════════════════════════════╝");
 
+    // HMI 로그 - 채점 결과
+    char score_buf[256];
+    snprintf(score_buf, sizeof(score_buf),
+      "점수: %d점 | 거리 오차: %.1fm | 정합 품질: %.1f%%",
+      score_result.score, dist_error, sweep_result.best_alignment.fitness * 100);
+    hmiLog(score_buf);
+
     if (score_result.status != "OK") {
       RCLCPP_WARN(this->get_logger(), "[결과] 실패 - %s", score_result.reason.c_str());
+      hmiLog("실패: " + score_result.reason);
     } else if (score_result.score >= 4000) {
       RCLCPP_INFO(this->get_logger(), "[결과] 훌륭합니다! 거의 정확한 위치입니다!");
+      hmiLog("훌륭합니다! 거의 정확한 위치입니다!");
     } else if (score_result.score >= 2500) {
       RCLCPP_INFO(this->get_logger(), "[결과] 좋습니다! 꽤 가까운 위치입니다.");
+      hmiLog("좋습니다! 꽤 가까운 위치입니다.");
     } else if (score_result.score >= 1000) {
       RCLCPP_INFO(this->get_logger(), "[결과] 아쉽네요. 조금 멀었습니다.");
+      hmiLog("아쉽네요. 조금 멀었습니다.");
     } else {
       RCLCPP_INFO(this->get_logger(), "[결과] 많이 멀었네요. 다음 라운드에 도전하세요!");
+      hmiLog("많이 멀었네요. 다음 라운드에 도전하세요!");
     }
+    hmiLog("맵을 다시 클릭하면 다음 라운드로 이동합니다.");
   }
 
   void publishFailResult(const std::string & reason, double x, double y, double z)
   {
     RCLCPP_WARN(this->get_logger(), "[실패] %s", reason.c_str());
+    hmiLog("실패: " + reason);
 
     std_msgs::msg::Int32 score_msg;
     score_msg.data = 0;
@@ -352,6 +422,7 @@ private:
     state_ = GameState::SHOWING_RESULT;
 
     RCLCPP_INFO(this->get_logger(), "▶ 맵을 다시 클릭하면 다음 라운드로 넘어갑니다");
+    hmiLog("맵을 다시 클릭하면 다음 라운드로 이동합니다.");
   }
 
   void publishMarkers(const std::vector<double> & clicked, const std::vector<double> & gt)
@@ -438,11 +509,7 @@ private:
 
     status_msg.data = status.dump();
     status_pub_->publish(status_msg);
-
-    // Query를 주기적으로 publish (새 구독자를 위해)
-    if (state_ == GameState::WAITING_CLICK) {
-      publishQuery();
-    }
+    // Note: Query는 라운드 시작 시 1회만 publish (transient_local QoS로 새 구독자도 수신 가능)
   }
 
   // Parameters
@@ -473,9 +540,20 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr query_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_query_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr hmi_log_pub_;
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr click_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr viewer_ready_sub_;
   rclcpp::TimerBase::SharedPtr status_timer_;
   rclcpp::TimerBase::SharedPtr result_timer_;
+
+  // HMI 로그 발행 헬퍼
+  void hmiLog(const std::string & msg)
+  {
+    std_msgs::msg::String log_msg;
+    log_msg.data = msg;
+    hmi_log_pub_->publish(log_msg);
+  }
 };
 
 int main(int argc, char ** argv)

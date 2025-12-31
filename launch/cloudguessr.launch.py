@@ -22,10 +22,11 @@ def generate_launch_description():
     src_dir = os.path.join(pkg_dir, '..', '..', '..', '..', 'src', 'cloudguessr')
 
     # Default paths
-    default_map_vis = os.path.join(src_dir, 'data', 'campus_q32.pcd')
+    default_map_vis = os.path.join(src_dir, 'data', 'campus_q16.pcd')
     default_map_score = os.path.join(src_dir, 'data', 'campus_q8.pcd')
     default_rounds_dir = os.path.join(src_dir, 'data', 'rounds')
     query_viewer_script = os.path.join(src_dir, 'scripts', 'query_viewer.py')
+    hmi_display_script = os.path.join(src_dir, 'scripts', 'hmi_display.py')
     rviz_config = os.path.join(src_dir, 'config', 'cloudguessr.rviz')
 
     # Launch arguments
@@ -88,6 +89,21 @@ def generate_launch_description():
         output='screen',
     )
 
+    # HMI Display (별도 터미널에서 실행)
+    venv_activate = os.path.join(pkg_dir, '..', '..', '..', '..', '.venv', 'bin', 'activate')
+    hmi_display = ExecuteProcess(
+        cmd=[
+            'gnome-terminal', '--title=CloudGuessr HMI', '--geometry=60x35',
+            '--', 'bash', '-c',
+            f'source /opt/ros/humble/setup.bash && '
+            f'source {os.path.join(pkg_dir, "..", "..", "..", "..", "install", "setup.bash")} && '
+            f'source {venv_activate} && '
+            f'python3 {hmi_display_script}; exec bash'
+        ],
+        name='hmi_display',
+        output='screen',
+    )
+
     # RViz
     rviz_node = Node(
         package='rviz2',
@@ -104,5 +120,6 @@ def generate_launch_description():
         map_server_node,
         round_manager_node,
         query_viewer,
+        hmi_display,
         rviz_node,
     ])

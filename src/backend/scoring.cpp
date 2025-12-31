@@ -99,12 +99,37 @@ double calculateDistanceError(const std::vector<double>& clicked_xyz,
   if (clicked_xyz.size() < 3 || gt_xyz.size() < 3) {
     return 0.0;
   }
-  
+
   double dx = clicked_xyz[0] - gt_xyz[0];
   double dy = clicked_xyz[1] - gt_xyz[1];
   double dz = clicked_xyz[2] - gt_xyz[2];
-  
+
   return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+int computeScoreFromDistance(double distance_m,
+                             double fitness,
+                             double max_distance) {
+  // 3m 이내는 만점 구간
+  const double perfect_range = 3.0;
+  double effective_distance = std::max(0.0, distance_m - perfect_range);
+
+  // 맵 반경 대비 비율 (0~1)
+  double ratio = std::min(1.0, effective_distance / max_distance);
+
+  // Power 함수로 완만한 감소 (지수 0.4 = 로그 느낌)
+  // ratio=0 -> 5000, ratio=0.5 -> 1210, ratio=1 -> 0
+  double distance_score = 5000.0 * std::max(0.0, 1.0 - std::pow(ratio, 0.4));
+
+  // Fitness bonus multiplier (0.7 ~ 1.0)
+  double fitness_bonus = 0.7 + 0.3 * std::min(1.0, std::max(0.0, fitness));
+
+  double final_score = distance_score * fitness_bonus;
+
+  // Clamp to valid range
+  final_score = std::max(0.0, std::min(5000.0, final_score));
+
+  return static_cast<int>(std::round(final_score));
 }
 
 }  // namespace scoring

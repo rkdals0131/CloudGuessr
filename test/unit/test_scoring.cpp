@@ -124,11 +124,73 @@ TEST_F(ScoringTest, CalculateDistanceError_Correct) {
 TEST_F(ScoringTest, CalculateDistanceError_3D) {
   std::vector<double> clicked = {0.0, 0.0, 0.0};
   std::vector<double> gt = {1.0, 2.0, 2.0};
-  
+
   double error = cloudguessr::scoring::calculateDistanceError(clicked, gt);
-  
+
   // Expected: sqrt(1 + 4 + 4) = 3.0
   EXPECT_NEAR(error, 3.0, 1e-6);
+}
+
+// UT-SCORE-03: Distance-based scoring tests (power function, max_distance=350)
+TEST_F(ScoringTest, ComputeScoreFromDistance_PerfectRange) {
+  // 3m 이내는 모두 만점
+  EXPECT_EQ(cloudguessr::scoring::computeScoreFromDistance(0.0, 1.0), 5000);
+  EXPECT_EQ(cloudguessr::scoring::computeScoreFromDistance(1.0, 1.0), 5000);
+  EXPECT_EQ(cloudguessr::scoring::computeScoreFromDistance(2.0, 1.0), 5000);
+  EXPECT_EQ(cloudguessr::scoring::computeScoreFromDistance(3.0, 1.0), 5000);
+}
+
+TEST_F(ScoringTest, ComputeScoreFromDistance_InValidRange) {
+  // Test various distances
+  std::vector<double> distances = {0.0, 5.0, 10.0, 50.0, 100.0, 200.0, 350.0};
+
+  for (double dist : distances) {
+    int score = cloudguessr::scoring::computeScoreFromDistance(dist, 1.0);
+    EXPECT_GE(score, 0) << "distance=" << dist;
+    EXPECT_LE(score, 5000) << "distance=" << dist;
+  }
+}
+
+TEST_F(ScoringTest, ComputeScoreFromDistance_Monotonic) {
+  // Closer distance -> higher score (beyond 3m perfect range)
+  int score_3m = cloudguessr::scoring::computeScoreFromDistance(3.0, 1.0);
+  int score_10m = cloudguessr::scoring::computeScoreFromDistance(10.0, 1.0);
+  int score_50m = cloudguessr::scoring::computeScoreFromDistance(50.0, 1.0);
+  int score_100m = cloudguessr::scoring::computeScoreFromDistance(100.0, 1.0);
+
+  EXPECT_EQ(score_3m, 5000);  // Still perfect at 3m
+  EXPECT_GT(score_3m, score_10m);
+  EXPECT_GT(score_10m, score_50m);
+  EXPECT_GT(score_50m, score_100m);
+}
+
+TEST_F(ScoringTest, ComputeScoreFromDistance_FitnessBonus) {
+  // Same distance, higher fitness -> higher score
+  double distance = 10.0;
+
+  int score_low_fit = cloudguessr::scoring::computeScoreFromDistance(distance, 0.3);
+  int score_mid_fit = cloudguessr::scoring::computeScoreFromDistance(distance, 0.6);
+  int score_high_fit = cloudguessr::scoring::computeScoreFromDistance(distance, 1.0);
+
+  EXPECT_LT(score_low_fit, score_high_fit);
+  EXPECT_LT(score_mid_fit, score_high_fit);
+  EXPECT_LE(score_low_fit, score_mid_fit);
+}
+
+TEST_F(ScoringTest, ComputeScoreFromDistance_ExpectedValues) {
+  // Power function: score = 5000 * (1 - ratio^0.4), max_distance=350
+  // effective_distance = distance - 3
+  // 10m: eff=7, ratio=7/350=0.02, score=5000*(1-0.02^0.4)≈4150
+  // 50m: eff=47, ratio=47/350≈0.134, score≈3400
+  // 100m: eff=97, ratio≈0.277, score≈2900
+
+  int score_3 = cloudguessr::scoring::computeScoreFromDistance(3.0, 1.0, 350.0);
+  int score_10 = cloudguessr::scoring::computeScoreFromDistance(10.0, 1.0, 350.0);
+  int score_100 = cloudguessr::scoring::computeScoreFromDistance(100.0, 1.0, 350.0);
+
+  EXPECT_EQ(score_3, 5000);
+  EXPECT_GT(score_10, 3900);   // 10m 오차 -> ~3954점
+  EXPECT_GT(score_100, 1900);  // 100m 오차 -> ~2007점
 }
 
 int main(int argc, char **argv) {

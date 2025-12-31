@@ -50,5 +50,22 @@ ScoreResult classifyResult(double fitness,
 double calculateDistanceError(const std::vector<double>& clicked_xyz,
                               const std::vector<double>& gt_xyz);
 
+/**
+ * @brief Compute score based on distance error (primary) and fitness (secondary)
+ *
+ * Score formula: 5000 * (1 - (effective_distance / max_distance)^0.4) * fitness_bonus
+ * - 3m 이내는 만점 구간 (effective_distance = 0)
+ * - 이후 power 함수로 완만하게 감소 (로그 느낌)
+ * - Fitness는 보조 지표 (0.7 ~ 1.0 배율)
+ *
+ * @param distance_m Distance error in meters
+ * @param fitness ICP fitness (0~1), used as bonus multiplier
+ * @param max_distance Map radius for normalization (default 350m)
+ * @return Score 0~5000
+ */
+int computeScoreFromDistance(double distance_m,
+                             double fitness = 1.0,
+                             double max_distance = 350.0);
+
 }  // namespace scoring
 }  // namespace cloudguessr
