@@ -13,7 +13,6 @@ from std_msgs.msg import String
 import sensor_msgs_py.point_cloud2 as pc2
 import numpy as np
 import open3d as o3d
-import json
 import threading
 
 
@@ -42,16 +41,7 @@ class QueryViewer(Node):
             query_qos
         )
 
-        self.status_sub = self.create_subscription(
-            String,
-            '/cloudguessr/status',
-            self.on_status,
-            10
-        )
-
-        self.current_round = -1  # round_idx 기준 (0부터 시작)
-        self.current_difficulty = ""
-        self.last_received_round = None  # 중복 수신 방지용 (None = 첫 수신 전)
+        self.last_rendered_round_idx = None  # query:<round_idx> 기준
 
         # Ready signal publisher
         self.ready_pub = self.create_publisher(String, '/cloudguessr/viewer_ready', 10)
@@ -81,9 +71,7 @@ class QueryViewer(Node):
         try:
             self.query_received = True  # Ready 신호 반복 중지
 
-            # 동일 라운드의 중복 수신 무시 (첫 수신은 항상 처리)
-            if self.last_received_round is not None and self.current_round == self.last_received_round:
-                return
+            msg_round_idx = self._parse_round_idx(msg.header.frame_id)
 
             # PointCloud2 -> numpy
             points = []
@@ -94,6 +82,10 @@ class QueryViewer(Node):
                 return
 
             points = np.array(points)
+            should_reset = (
+                self.last_rendered_round_idx is None
+                or (msg_round_idx is not None and msg_round_idx != self.last_rendered_round_idx)
+            )
 
             with self.lock:
                 self.pcd.points = o3d.utility.Vector3dVector(points)
@@ -103,28 +95,26 @@ class QueryViewer(Node):
                 colors[:, 1] = 0.5  # Some green
                 self.pcd.colors = o3d.utility.Vector3dVector(colors)
                 self.new_cloud = True
-                # 새 라운드이므로 뷰포인트 리셋
-                self.should_reset_view = True
-                self.last_received_round = self.current_round
+                self.should_reset_view = should_reset
 
-            self.get_logger().info(f'Query 수신: {len(points)} points (라운드 {self.current_round})')
+            if msg_round_idx is not None:
+                self.last_rendered_round_idx = msg_round_idx
+                self.get_logger().info(f'Query 수신: {len(points)} points (라운드 {msg_round_idx})')
+            else:
+                self.get_logger().warn(
+                    f'Query 수신: {len(points)} points (라운드 정보 없음: frame_id={msg.header.frame_id!r})')
 
         except Exception as e:
             self.get_logger().error(f'Query 처리 오류: {e}')
 
-    def on_status(self, msg: String):
-        """게임 상태 수신"""
+    @staticmethod
+    def _parse_round_idx(frame_id: str):
+        if not frame_id or not frame_id.startswith('query:'):
+            return None
         try:
-            status = json.loads(msg.data)
-            round_idx = status.get('round_idx', 0)
-            difficulty = status.get('difficulty', '')
-
-            if round_idx != self.current_round:
-                self.current_round = round_idx
-                self.current_difficulty = difficulty
-
-        except Exception as e:
-            pass
+            return int(frame_id.split(':', 1)[1])
+        except (IndexError, ValueError):
+            return None
 
     def run_visualizer(self):
         """Open3D visualizer 실행 (별도 스레드)"""

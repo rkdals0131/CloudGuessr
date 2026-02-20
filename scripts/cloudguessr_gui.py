@@ -2,7 +2,8 @@
 """
 CloudGuessr Desktop GUI (PySide6)
 
-- Subscribes: /cloudguessr/map, /cloudguessr/status, /cloudguessr/result, /cloudguessr/query
+- Subscribes: /cloudguessr/map, /cloudguessr/status, /cloudguessr/result,
+              /cloudguessr/query, /cloudguessr/aligned_query
 - Publishes:  /clicked_point, /cloudguessr/command
 """
 
@@ -14,6 +15,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import String
@@ -26,6 +28,7 @@ class RosBridge(QtCore.QObject):
     status_ready = QtCore.Signal(dict)
     result_ready = QtCore.Signal(dict)
     query_ready = QtCore.Signal(int)
+    aligned_ready = QtCore.Signal(object)
     log_ready = QtCore.Signal(str)
 
 
@@ -40,16 +43,29 @@ class CloudGuessrGuiNode(Node):
         self.create_subscription(PointCloud2, "/cloudguessr/map", self.on_map, 10)
         self.create_subscription(String, "/cloudguessr/status", self.on_status, 10)
         self.create_subscription(String, "/cloudguessr/result", self.on_result, 10)
-        self.create_subscription(PointCloud2, "/cloudguessr/query", self.on_query, 10)
+        query_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(PointCloud2, "/cloudguessr/query", self.on_query, query_qos)
+        self.create_subscription(PointCloud2, "/cloudguessr/aligned_query", self.on_aligned_query, query_qos)
 
         self.get_logger().info("CloudGuessr desktop GUI node started")
 
     def on_map(self, msg: PointCloud2):
+        map_points = self._sample_cloud(msg, max_render_points=30000)
+        if map_points is None:
+            return
+        self.bridge.map_ready.emit(map_points)
+
+    def on_aligned_query(self, msg: PointCloud2):
+        aligned_points = self._sample_cloud(msg, max_render_points=20000)
+        if aligned_points is None:
+            return
+        self.bridge.aligned_ready.emit(aligned_points)
+
+    def _sample_cloud(self, msg: PointCloud2, max_render_points: int):
         total_points = int(msg.width) * int(msg.height)
         if total_points <= 0:
-            return
+            return None
 
-        max_render_points = 30000
         stride = max(1, total_points // max_render_points)
         sampled = []
         for idx, p in enumerate(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)):
@@ -57,10 +73,8 @@ class CloudGuessrGuiNode(Node):
                 sampled.append((float(p[0]), float(p[1]), float(p[2])))
 
         if not sampled:
-            return
-
-        map_points = np.asarray(sampled, dtype=np.float32)
-        self.bridge.map_ready.emit(map_points)
+            return None
+        return np.asarray(sampled, dtype=np.float32)
 
     def on_status(self, msg: String):
         try:
@@ -102,9 +116,15 @@ class MapCanvas(QtWidgets.QWidget):
         super().__init__(parent)
         self.setMinimumSize(900, 700)
         self.map_points = None
+        self.aligned_points = None
         self.clicked_point = None
         self.gt_point = None
         self.bounds = None
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self.is_panning = False
+        self.last_pan_pos = QtCore.QPointF()
 
     def set_map_points(self, points: np.ndarray):
         self.map_points = points
@@ -118,7 +138,12 @@ class MapCanvas(QtWidgets.QWidget):
             max_x += 1.0
         if abs(max_y - min_y) < 1e-6:
             max_y += 1.0
-        self.bounds = (min_x, max_x, min_y, max_y)
+        next_bounds = (min_x, max_x, min_y, max_y)
+        if self.bounds is None or self._bounds_changed(next_bounds):
+            self.bounds = next_bounds
+            self.reset_view()
+        else:
+            self.bounds = next_bounds
         self.update()
 
     def set_result_points(self, clicked_xyz, gt_xyz):
@@ -128,11 +153,84 @@ class MapCanvas(QtWidgets.QWidget):
             self.gt_point = (float(gt_xyz[0]), float(gt_xyz[1]))
         self.update()
 
+    def set_aligned_points(self, points: np.ndarray):
+        self.aligned_points = points
+        self.update()
+
+    def clear_round_visuals(self, clear_aligned: bool):
+        self.clicked_point = None
+        self.gt_point = None
+        if clear_aligned:
+            self.aligned_points = None
+        self.update()
+
+    def reset_view(self):
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+
     def mousePressEvent(self, event: QtGui.QMouseEvent):
-        if event.button() != QtCore.Qt.LeftButton or self.bounds is None:
+        if self.bounds is None:
             return
-        x, y = self._screen_to_world(event.position())
-        self.map_clicked.emit(x, y)
+
+        if event.button() == QtCore.Qt.LeftButton:
+            x, y = self._screen_to_world(event.position())
+            self.map_clicked.emit(x, y)
+            return
+
+        if event.button() == QtCore.Qt.RightButton:
+            self.is_panning = True
+            self.last_pan_pos = event.position()
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent):
+        if self.is_panning:
+            delta = event.position() - self.last_pan_pos
+            self.pan_x += float(delta.x())
+            self.pan_y += float(delta.y())
+            self.last_pan_pos = event.position()
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent):
+        if event.button() == QtCore.Qt.RightButton and self.is_panning:
+            self.is_panning = False
+            self.setCursor(QtCore.Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event: QtGui.QWheelEvent):
+        if self.bounds is None:
+            return
+
+        delta_y = event.angleDelta().y()
+        if delta_y == 0:
+            return
+
+        zoom_factor = 1.15 if delta_y > 0 else (1.0 / 1.15)
+        prev_zoom = self.zoom
+        next_zoom = min(25.0, max(0.35, prev_zoom * zoom_factor))
+        if abs(next_zoom - prev_zoom) < 1e-6:
+            return
+
+        # Keep the world point under the cursor fixed while zooming.
+        cursor = event.position()
+        cx, cy = self._viewport_center()
+        sx0 = cx + (cursor.x() - self.pan_x - cx) / prev_zoom
+        sy0 = cy + (cursor.y() - self.pan_y - cy) / prev_zoom
+
+        self.zoom = next_zoom
+        self.pan_x = float(cursor.x() - cx - (sx0 - cx) * self.zoom)
+        self.pan_y = float(cursor.y() - cy - (sy0 - cy) * self.zoom)
+        self.update()
+        event.accept()
 
     def paintEvent(self, event):
         del event
@@ -149,6 +247,12 @@ class MapCanvas(QtWidgets.QWidget):
         for p in self.map_points:
             sx, sy = self._world_to_screen(float(p[0]), float(p[1]))
             painter.drawPoint(QtCore.QPointF(sx, sy))
+
+        if self.aligned_points is not None:
+            painter.setPen(QtGui.QPen(QtGui.QColor(70, 230, 220), 1))
+            for p in self.aligned_points:
+                sx, sy = self._world_to_screen(float(p[0]), float(p[1]))
+                painter.drawPoint(QtCore.QPointF(sx, sy))
 
         if self.clicked_point and self.gt_point:
             c_sx, c_sy = self._world_to_screen(*self.clicked_point)
@@ -172,7 +276,7 @@ class MapCanvas(QtWidgets.QWidget):
         painter.drawText(
             QtCore.QRectF(18, 12, self.width() - 36, 28),
             QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
-            'Map Canvas: 클릭하여 정답 위치를 제출하세요',
+            'Map Canvas: 좌클릭 제출 | 우클릭 드래그 팬 | 휠 줌',
         )
 
     def _world_to_screen(self, x: float, y: float):
@@ -185,6 +289,9 @@ class MapCanvas(QtWidgets.QWidget):
         ny = (y - min_y) / (max_y - min_y)
         sx = margin + nx * w
         sy = margin + (1.0 - ny) * h
+        cx, cy = self._viewport_center()
+        sx = cx + (sx - cx) * self.zoom + self.pan_x
+        sy = cy + (sy - cy) * self.zoom + self.pan_y
         return sx, sy
 
     def _screen_to_world(self, pos: QtCore.QPointF):
@@ -193,14 +300,26 @@ class MapCanvas(QtWidgets.QWidget):
         w = max(1.0, self.width() - 2.0 * margin)
         h = max(1.0, self.height() - 2.0 * margin)
 
-        nx = (pos.x() - margin) / w
-        ny = 1.0 - ((pos.y() - margin) / h)
+        cx, cy = self._viewport_center()
+        sx = cx + (pos.x() - self.pan_x - cx) / self.zoom
+        sy = cy + (pos.y() - self.pan_y - cy) / self.zoom
+
+        nx = (sx - margin) / w
+        ny = 1.0 - ((sy - margin) / h)
         nx = min(1.0, max(0.0, nx))
         ny = min(1.0, max(0.0, ny))
 
         x = min_x + nx * (max_x - min_x)
         y = min_y + ny * (max_y - min_y)
         return x, y
+
+    def _viewport_center(self):
+        return self.width() * 0.5, self.height() * 0.5
+
+    def _bounds_changed(self, next_bounds):
+        if self.bounds is None:
+            return True
+        return any(abs(float(a) - float(b)) > 1e-3 for a, b in zip(self.bounds, next_bounds))
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -210,6 +329,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge = bridge
         self.map_points = None
         self.current_state = 'IDLE'
+        self.current_round_idx = -1
+        self.last_status_query_points = None
 
         self.setWindowTitle('CloudGuessr - Game Console')
         self.resize(1520, 920)
@@ -334,19 +455,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.diff_label = QtWidgets.QLabel('-')
         self.diff_label.setObjectName('metricValue')
 
+        self.round_id_title = QtWidgets.QLabel('ROUND ID')
+        self.round_id_title.setObjectName('metricTitle')
+        self.round_id_label = QtWidgets.QLabel('-')
+        self.round_id_label.setObjectName('metricValue')
+
         self.query_title = QtWidgets.QLabel('QUERY POINTS')
         self.query_title.setObjectName('metricTitle')
         self.query_label = QtWidgets.QLabel('-')
         self.query_label.setObjectName('metricValue')
 
+        self.notes_title = QtWidgets.QLabel('ROUND NOTES')
+        self.notes_title.setObjectName('metricTitle')
+        self.notes_label = QtWidgets.QLabel('-')
+        self.notes_label.setObjectName('hint')
+        self.notes_label.setWordWrap(True)
+        self.notes_label.setMinimumHeight(36)
+
         status_grid.addWidget(self.round_title, 0, 0)
         status_grid.addWidget(self.state_title, 0, 1)
-        status_grid.addWidget(self.diff_title, 2, 0)
-        status_grid.addWidget(self.query_title, 2, 1)
+        status_grid.addWidget(self.diff_title, 0, 2)
         status_grid.addWidget(self.round_label, 1, 0)
         status_grid.addWidget(self.state_label, 1, 1)
-        status_grid.addWidget(self.diff_label, 3, 0)
+        status_grid.addWidget(self.diff_label, 1, 2)
+        status_grid.addWidget(self.round_id_title, 2, 0)
+        status_grid.addWidget(self.query_title, 2, 1)
+        status_grid.addWidget(self.round_id_label, 3, 0)
         status_grid.addWidget(self.query_label, 3, 1)
+        status_grid.addWidget(self.notes_title, 4, 0, 1, 3)
+        status_grid.addWidget(self.notes_label, 5, 0, 1, 3)
         right_layout.addWidget(status_card)
 
         score_card = QtWidgets.QFrame()
@@ -369,6 +506,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reason_label.setObjectName('hint')
         self.last_click_label = QtWidgets.QLabel('Last Click: -')
         self.last_click_label.setObjectName('hint')
+        self.summary_label = QtWidgets.QLabel('Summary: -')
+        self.summary_label.setObjectName('hint')
         score_layout.addWidget(score_title)
         score_layout.addWidget(self.score_label)
         score_layout.addWidget(self.result_status)
@@ -376,6 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         score_layout.addWidget(self.quality_label)
         score_layout.addWidget(self.reason_label)
         score_layout.addWidget(self.last_click_label)
+        score_layout.addWidget(self.summary_label)
         right_layout.addWidget(score_card)
 
         control_card = QtWidgets.QFrame()
@@ -389,7 +529,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_btn = QtWidgets.QPushButton('Reset Round')
         button_row.addWidget(self.next_btn)
         button_row.addWidget(self.reset_btn)
-        self.help_label = QtWidgets.QLabel('맵 클릭으로 답 제출. SCORING 상태에서는 버튼이 잠깁니다.')
+        self.help_label = QtWidgets.QLabel('좌클릭 제출 | 우클릭 드래그 팬 | 휠 확대/축소')
         self.help_label.setObjectName('hint')
         control_layout.addLayout(button_row)
         control_layout.addWidget(self.help_label)
@@ -407,6 +547,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.status_ready.connect(self.on_status_ready)
         self.bridge.result_ready.connect(self.on_result_ready)
         self.bridge.query_ready.connect(self.on_query_ready)
+        self.bridge.aligned_ready.connect(self.on_aligned_ready)
         self.bridge.log_ready.connect(self.append_log)
 
     @QtCore.Slot(object)
@@ -417,15 +558,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(dict)
     def on_status_ready(self, status):
-        round_idx = int(status.get('round_idx', 0)) + 1
+        prev_state = self.current_state
+        round_idx_zero = int(status.get('round_idx', 0))
+        round_idx = round_idx_zero + 1
         total_rounds = int(status.get('total_rounds', 0))
+        round_id = status.get('round_id', '-')
         state = status.get('state_str', '-')
         difficulty = status.get('difficulty', '-')
+        notes = str(status.get('round_notes', '') or '').strip()
+        query_points = status.get('query_points')
 
         self.current_state = state
         self.round_label.setText(f'{round_idx}/{total_rounds}')
         self.state_label.setText(state)
         self.diff_label.setText(difficulty)
+        self.round_id_label.setText(str(round_id))
+        self.notes_label.setText(notes if notes else '-')
+        if query_points is not None:
+            self.last_status_query_points = int(query_points)
+            self.query_label.setText(str(self.last_status_query_points))
+        else:
+            self.last_status_query_points = None
+
+        if round_idx_zero != self.current_round_idx:
+            self.current_round_idx = round_idx_zero
+            self.canvas.clear_round_visuals(clear_aligned=True)
+            note_text = notes if notes else '-'
+            self.append_log(
+                f'round {round_idx}/{total_rounds} | id={round_id} | '
+                f'difficulty={difficulty} | notes={note_text}'
+            )
+        elif state == 'WAITING_CLICK' and prev_state != 'WAITING_CLICK':
+            self.canvas.clear_round_visuals(clear_aligned=True)
 
         state_color = {
             'IDLE': '#9fb2c7',
@@ -478,11 +642,24 @@ class MainWindow(QtWidgets.QMainWindow):
         clicked = result.get('clicked_xyz')
         gt = result.get('gt_xyz')
         self.canvas.set_result_points(clicked, gt)
+        if dist_error is not None and fitness is not None and rmse is not None:
+            self.summary_label.setText(
+                f'Summary: score={score}, err={float(dist_error):.2f}m, '
+                f'fit={float(fitness):.3f}, rmse={float(rmse):.3f}'
+            )
+        else:
+            self.summary_label.setText(f'Summary: score={score}, status={status}')
         self.append_log(f'result score={score}, status={status}')
 
     @QtCore.Slot(int)
     def on_query_ready(self, count):
-        self.query_label.setText(str(count))
+        if self.last_status_query_points is None:
+            self.query_label.setText(str(count))
+
+    @QtCore.Slot(object)
+    def on_aligned_ready(self, points):
+        self.canvas.set_aligned_points(points)
+        self.append_log(f'aligned ICP overlay updated: {len(points)} points')
 
     @QtCore.Slot(float, float)
     def on_map_clicked(self, x: float, y: float):

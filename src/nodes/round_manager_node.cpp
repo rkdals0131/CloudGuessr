@@ -97,8 +97,11 @@ public:
     query_qos.transient_local();
     query_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloudguessr/query", query_qos);
 
-    // Aligned query publisher (ICP 정합 결과 시각화용)
-    aligned_query_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloudguessr/aligned_query", 10);
+    // Aligned query publisher with transient_local QoS (late subscribers receive last result)
+    rclcpp::QoS aligned_query_qos(1);
+    aligned_query_qos.transient_local();
+    aligned_query_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "/cloudguessr/aligned_query", aligned_query_qos);
 
     // Subscribers
     click_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
@@ -210,6 +213,7 @@ private:
 
     state_ = GameState::WAITING_CLICK;
     clearMarkers();
+    publishStatus();
     publishQuery();
   }
 
@@ -219,10 +223,14 @@ private:
 
     sensor_msgs::msg::PointCloud2 query_msg;
     pcl::toROSMsg(*current_query_original_, query_msg);
-    query_msg.header.frame_id = "query";
+    query_msg.header.frame_id = "query:" + std::to_string(current_round_idx_);
     query_msg.header.stamp = this->now();
     query_pub_->publish(query_msg);
-    RCLCPP_INFO(this->get_logger(), "[Query 발행] %zu 포인트", current_query_original_->size());
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[Query 발행] 라운드 %zu, %zu 포인트",
+      current_round_idx_,
+      current_query_original_->size());
   }
 
   void onViewerReady(const std_msgs::msg::String::SharedPtr /*msg*/)
@@ -571,6 +579,8 @@ private:
     status["total_rounds"] = round_dirs_.size();
     status["round_id"] = current_meta_.round_id;
     status["difficulty"] = current_meta_.difficulty;
+    status["round_notes"] = current_meta_.notes;
+    status["query_points"] = current_query_original_ ? current_query_original_->size() : 0;
 
     std::string state_str;
     switch (state_) {
