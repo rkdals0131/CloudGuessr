@@ -319,34 +319,23 @@ class MapCanvas(QtWidgets.QWidget):
         return sx, sy
 
     def _world_to_base_screen(self, x: float, y: float):
-        min_x, max_x, min_y, max_y = self.bounds
-        margin = 24.0
-        w = max(1.0, self.width() - 2.0 * margin)
-        h = max(1.0, self.height() - 2.0 * margin)
-
-        nx = (x - min_x) / (max_x - min_x)
-        ny = (y - min_y) / (max_y - min_y)
-        sx = margin + nx * w
-        sy = margin + (1.0 - ny) * h
+        scale, offset_x, offset_y, min_x, max_y = self._base_transform()
+        sx = offset_x + (x - min_x) * scale
+        sy = offset_y + (max_y - y) * scale
         return sx, sy
 
     def _screen_to_world(self, pos: QtCore.QPointF):
         min_x, max_x, min_y, max_y = self.bounds
-        margin = 24.0
-        w = max(1.0, self.width() - 2.0 * margin)
-        h = max(1.0, self.height() - 2.0 * margin)
 
         cx, cy = self._viewport_center()
         sx = cx + (pos.x() - self.pan_x - cx) / self.zoom
         sy = cy + (pos.y() - self.pan_y - cy) / self.zoom
 
-        nx = (sx - margin) / w
-        ny = 1.0 - ((sy - margin) / h)
-        nx = min(1.0, max(0.0, nx))
-        ny = min(1.0, max(0.0, ny))
-
-        x = min_x + nx * (max_x - min_x)
-        y = min_y + ny * (max_y - min_y)
+        scale, offset_x, offset_y, transform_min_x, transform_max_y = self._base_transform()
+        x = transform_min_x + (sx - offset_x) / scale
+        y = transform_max_y - (sy - offset_y) / scale
+        x = min(max_x, max(min_x, x))
+        y = min(max_y, max(min_y, y))
         return x, y
 
     def _viewport_center(self):
@@ -379,18 +368,26 @@ class MapCanvas(QtWidgets.QWidget):
         self.aligned_poly_dirty = False
 
     def _build_base_poly(self, points: np.ndarray):
-        min_x, max_x, min_y, max_y = self.bounds
-        margin = 24.0
-        w = max(1.0, self.width() - 2.0 * margin)
-        h = max(1.0, self.height() - 2.0 * margin)
-
+        scale, offset_x, offset_y, min_x, max_y = self._base_transform()
         xs = points[:, 0].astype(np.float64, copy=False)
         ys = points[:, 1].astype(np.float64, copy=False)
-        nx = (xs - min_x) / (max_x - min_x)
-        ny = (ys - min_y) / (max_y - min_y)
-        sx = margin + nx * w
-        sy = margin + (1.0 - ny) * h
+        sx = offset_x + (xs - min_x) * scale
+        sy = offset_y + (max_y - ys) * scale
         return QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in zip(sx, sy)])
+
+    def _base_transform(self):
+        min_x, max_x, min_y, max_y = self.bounds
+        margin = 24.0
+        avail_w = max(1.0, self.width() - 2.0 * margin)
+        avail_h = max(1.0, self.height() - 2.0 * margin)
+        span_x = max(1e-6, max_x - min_x)
+        span_y = max(1e-6, max_y - min_y)
+        scale = min(avail_w / span_x, avail_h / span_y)
+        content_w = span_x * scale
+        content_h = span_y * scale
+        offset_x = margin + (avail_w - content_w) * 0.5
+        offset_y = margin + (avail_h - content_h) * 0.5
+        return scale, offset_x, offset_y, min_x, max_y
 
     def set_result_overlay(
         self,
@@ -518,7 +515,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.map_points = None
         self.current_state = 'IDLE'
         self.current_round_idx = -1
-        self.last_status_query_points = None
 
         self.setWindowTitle('CloudGuessr - Game Console')
         self.resize(1520, 920)
@@ -527,6 +523,11 @@ class MainWindow(QtWidgets.QMainWindow):
             QMainWindow {
                 background-color: #0f141b;
                 color: #ecf2ff;
+            }
+            QFrame#panelBox {
+                background-color: #121a24;
+                border: 1px solid #26374a;
+                border-radius: 10px;
             }
             QLabel#title {
                 font-size: 30px;
@@ -537,28 +538,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-size: 13px;
                 color: #9fb2c7;
             }
-            QFrame#card {
-                background-color: #151c25;
-                border: 1px solid #283748;
-                border-radius: 10px;
-            }
-            QLabel#metricTitle {
-                font-size: 11px;
-                color: #9fb2c7;
-            }
-            QLabel#metricValue {
-                font-size: 19px;
-                font-weight: 600;
-                color: #f4f7ff;
-            }
-            QLabel#scoreValue {
-                font-size: 42px;
-                font-weight: 700;
-                color: #6df3a9;
-            }
-            QLabel#hint {
+            QLabel#metaText {
                 font-size: 12px;
-                color: #99b4d1;
+                color: #dce8f6;
+                padding: 0px;
+            }
+            QLabel#stateText {
+                font-size: 12px;
+                font-weight: 700;
+                color: #ecf2ff;
+                padding: 0px;
             }
             QPushButton {
                 background-color: #2a3c52;
@@ -591,139 +580,74 @@ class MainWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        header = QtWidgets.QFrame()
-        header.setObjectName('card')
-        header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(14, 12, 14, 12)
-        header_layout.setSpacing(2)
+        top_bar_height = 92
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(10)
+        root.addLayout(top_row)
 
+        box_title = QtWidgets.QFrame()
+        box_title.setObjectName('panelBox')
+        box_title.setFixedHeight(top_bar_height)
+        box_title.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
+        title_block = QtWidgets.QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(2)
         title = QtWidgets.QLabel('CloudGuessr')
         title.setObjectName('title')
         subtitle = QtWidgets.QLabel(
             '메인 게임 GUI: 맵에서 클릭해 정답 제출 | Query 3D는 Open3D 보조 창에서 확인'
         )
         subtitle.setObjectName('subtitle')
-        header_layout.addWidget(title)
-        header_layout.addWidget(subtitle)
-        root.addWidget(header)
+        title_block.addWidget(title)
+        title_block.addWidget(subtitle)
+        title_wrap = QtWidgets.QVBoxLayout(box_title)
+        title_wrap.setContentsMargins(14, 10, 14, 10)
+        title_wrap.setSpacing(2)
+        title_wrap.addLayout(title_block)
+        top_row.addWidget(box_title)
 
-        body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
-        root.addLayout(body, stretch=1)
+        box_status = QtWidgets.QFrame()
+        box_status.setObjectName('panelBox')
+        box_status.setFixedHeight(top_bar_height)
+        box_status.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        status_block = QtWidgets.QHBoxLayout()
+        status_block.setContentsMargins(0, 0, 0, 0)
+        status_block.setSpacing(14)
+        self.round_text = QtWidgets.QLabel('ROUND -/-')
+        self.round_text.setObjectName('metaText')
+        self.state_text = QtWidgets.QLabel('STATE IDLE')
+        self.state_text.setObjectName('stateText')
+        self.diff_text = QtWidgets.QLabel('DIFFICULTY -')
+        self.diff_text.setObjectName('metaText')
+        self.round_id_text = QtWidgets.QLabel('ROUND ID -')
+        self.round_id_text.setObjectName('metaText')
+        self.notes_text = QtWidgets.QLabel('NOTES -')
+        self.notes_text.setObjectName('metaText')
+        self.notes_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        status_block.addWidget(self.round_text)
+        status_block.addWidget(self.state_text)
+        status_block.addWidget(self.diff_text)
+        status_block.addWidget(self.round_id_text)
+        status_block.addWidget(self.notes_text, 1)
+        status_wrap = QtWidgets.QHBoxLayout(box_status)
+        status_wrap.setContentsMargins(14, 10, 14, 10)
+        status_wrap.setSpacing(14)
+        status_wrap.addLayout(status_block, 1)
+        top_row.addWidget(box_status, 1)
 
-        self.canvas = MapCanvas()
-        body.addWidget(self.canvas, stretch=3)
-
-        right = QtWidgets.QFrame()
-        right.setObjectName('card')
-        right_layout = QtWidgets.QVBoxLayout(right)
-        right_layout.setContentsMargins(12, 12, 12, 12)
-        right_layout.setSpacing(10)
-        body.addWidget(right, stretch=1)
-
-        status_card = QtWidgets.QFrame()
-        status_card.setObjectName('card')
-        status_grid = QtWidgets.QGridLayout(status_card)
-        status_grid.setContentsMargins(10, 10, 10, 10)
-        status_grid.setHorizontalSpacing(8)
-        status_grid.setVerticalSpacing(4)
-
-        self.round_title = QtWidgets.QLabel('ROUND')
-        self.round_title.setObjectName('metricTitle')
-        self.round_label = QtWidgets.QLabel('-/-')
-        self.round_label.setObjectName('metricValue')
-
-        self.state_title = QtWidgets.QLabel('STATE')
-        self.state_title.setObjectName('metricTitle')
-        self.state_label = QtWidgets.QLabel('IDLE')
-        self.state_label.setObjectName('metricValue')
-
-        self.diff_title = QtWidgets.QLabel('DIFFICULTY')
-        self.diff_title.setObjectName('metricTitle')
-        self.diff_label = QtWidgets.QLabel('-')
-        self.diff_label.setObjectName('metricValue')
-
-        self.round_id_title = QtWidgets.QLabel('ROUND ID')
-        self.round_id_title.setObjectName('metricTitle')
-        self.round_id_label = QtWidgets.QLabel('-')
-        self.round_id_label.setObjectName('metricValue')
-
-        self.query_title = QtWidgets.QLabel('QUERY POINTS')
-        self.query_title.setObjectName('metricTitle')
-        self.query_label = QtWidgets.QLabel('-')
-        self.query_label.setObjectName('metricValue')
-
-        self.notes_title = QtWidgets.QLabel('ROUND NOTES')
-        self.notes_title.setObjectName('metricTitle')
-        self.notes_label = QtWidgets.QLabel('-')
-        self.notes_label.setObjectName('hint')
-        self.notes_label.setWordWrap(True)
-        self.notes_label.setMinimumHeight(36)
-
-        status_grid.addWidget(self.round_title, 0, 0)
-        status_grid.addWidget(self.state_title, 0, 1)
-        status_grid.addWidget(self.diff_title, 0, 2)
-        status_grid.addWidget(self.round_label, 1, 0)
-        status_grid.addWidget(self.state_label, 1, 1)
-        status_grid.addWidget(self.diff_label, 1, 2)
-        status_grid.addWidget(self.round_id_title, 2, 0)
-        status_grid.addWidget(self.query_title, 2, 1)
-        status_grid.addWidget(self.round_id_label, 3, 0)
-        status_grid.addWidget(self.query_label, 3, 1)
-        status_grid.addWidget(self.notes_title, 4, 0, 1, 3)
-        status_grid.addWidget(self.notes_label, 5, 0, 1, 3)
-        right_layout.addWidget(status_card)
-
-        score_card = QtWidgets.QFrame()
-        score_card.setObjectName('card')
-        score_layout = QtWidgets.QVBoxLayout(score_card)
-        score_layout.setContentsMargins(10, 10, 10, 10)
-        score_layout.setSpacing(4)
-
-        score_title = QtWidgets.QLabel('SCORE')
-        score_title.setObjectName('metricTitle')
-        self.score_label = QtWidgets.QLabel('0')
-        self.score_label.setObjectName('scoreValue')
-        self.distance_label = QtWidgets.QLabel('거리 오차: -')
-        self.distance_label.setObjectName('hint')
-        self.quality_label = QtWidgets.QLabel('정합 품질: -')
-        self.quality_label.setObjectName('hint')
-        self.elapsed_label = QtWidgets.QLabel('처리 시간: -')
-        self.elapsed_label.setObjectName('hint')
-        self.comment_label = QtWidgets.QLabel('멘트: 라운드를 시작하세요.')
-        self.comment_label.setObjectName('hint')
-        self.comment_label.setWordWrap(True)
-        self.next_hint_label = QtWidgets.QLabel('결과 확인 후 Next Round 버튼으로 진행')
-        self.next_hint_label.setObjectName('hint')
-        score_layout.addWidget(score_title)
-        score_layout.addWidget(self.score_label)
-        score_layout.addWidget(self.distance_label)
-        score_layout.addWidget(self.quality_label)
-        score_layout.addWidget(self.elapsed_label)
-        score_layout.addWidget(self.comment_label)
-        score_layout.addWidget(self.next_hint_label)
-        right_layout.addWidget(score_card)
-
-        control_card = QtWidgets.QFrame()
-        control_card.setObjectName('card')
-        control_layout = QtWidgets.QVBoxLayout(control_card)
-        control_layout.setContentsMargins(10, 10, 10, 10)
-        control_layout.setSpacing(8)
-
-        button_row = QtWidgets.QHBoxLayout()
+        button_height = top_bar_height
         self.next_btn = QtWidgets.QPushButton('Next Round')
         self.reset_btn = QtWidgets.QPushButton('Reset Round')
-        button_row.addWidget(self.next_btn)
-        button_row.addWidget(self.reset_btn)
-        self.help_label = QtWidgets.QLabel('좌클릭 제출 | 우클릭 드래그 팬 | 휠 확대/축소')
-        self.help_label.setObjectName('hint')
-        control_layout.addLayout(button_row)
-        control_layout.addWidget(self.help_label)
-        right_layout.addWidget(control_card)
+        self.next_btn.setFixedHeight(button_height)
+        self.reset_btn.setFixedHeight(button_height)
+        self.next_btn.setMinimumWidth(140)
+        self.reset_btn.setMinimumWidth(140)
+        top_row.addWidget(self.next_btn)
+        top_row.addWidget(self.reset_btn)
 
-        self.log_view = QtWidgets.QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        right_layout.addWidget(self.log_view, stretch=1)
+        self.canvas = MapCanvas()
+        root.addWidget(self.canvas, stretch=1)
 
         self.canvas.map_clicked.connect(self.on_map_clicked)
         self.next_btn.clicked.connect(lambda: self.node.publish_command('next_round'))
@@ -732,20 +656,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.map_ready.connect(self.on_map_ready)
         self.bridge.status_ready.connect(self.on_status_ready)
         self.bridge.result_ready.connect(self.on_result_ready)
-        self.bridge.query_ready.connect(self.on_query_ready)
         self.bridge.aligned_ready.connect(self.on_aligned_ready)
         self.bridge.log_ready.connect(self.append_log)
-        self._reset_score_panel()
-
-    def _reset_score_panel(self):
-        self.score_label.setText('0')
-        self.score_label.setStyleSheet('color: #6df3a9; font-size: 42px; font-weight: 700;')
-        self.distance_label.setText('거리 오차: -')
-        self.quality_label.setText('정합 품질: -')
-        self.elapsed_label.setText('처리 시간: -')
-        self.comment_label.setText('멘트: 라운드를 시작하세요.')
-        self.next_hint_label.setText('결과 확인 후 Next Round 버튼으로 진행')
-        self.canvas.clear_result_overlay()
 
     @QtCore.Slot(object)
     def on_map_ready(self, points):
@@ -763,32 +675,26 @@ class MainWindow(QtWidgets.QMainWindow):
         state = status.get('state_str', '-')
         difficulty = status.get('difficulty', '-')
         notes = str(status.get('round_notes', '') or '').strip()
-        query_points = status.get('query_points')
 
         self.current_state = state
-        self.round_label.setText(f'{round_idx}/{total_rounds}')
-        self.state_label.setText(state)
-        self.diff_label.setText(difficulty)
-        self.round_id_label.setText(str(round_id))
-        self.notes_label.setText(notes if notes else '-')
-        if query_points is not None:
-            self.last_status_query_points = int(query_points)
-            self.query_label.setText(str(self.last_status_query_points))
-        else:
-            self.last_status_query_points = None
+        self.round_text.setText(f'ROUND {round_idx}/{total_rounds}')
+        self.state_text.setText(f'STATE {state}')
+        self.diff_text.setText(f'DIFFICULTY {difficulty}')
+        self.round_id_text.setText(f'ROUND ID {round_id}')
+        note_text = notes if notes else '-'
+        if len(note_text) > 60:
+            note_text = note_text[:57] + '...'
+        self.notes_text.setText(f'NOTES {note_text}')
 
         if round_idx_zero != self.current_round_idx:
             self.current_round_idx = round_idx_zero
             self.canvas.clear_round_visuals(clear_aligned=True)
-            self._reset_score_panel()
-            note_text = notes if notes else '-'
             self.append_log(
                 f'round {round_idx}/{total_rounds} | id={round_id} | '
                 f'difficulty={difficulty} | notes={note_text}'
             )
         elif state == 'WAITING_CLICK' and prev_state != 'WAITING_CLICK':
             self.canvas.clear_round_visuals(clear_aligned=True)
-            self._reset_score_panel()
 
         state_color = {
             'IDLE': '#9fb2c7',
@@ -797,7 +703,7 @@ class MainWindow(QtWidgets.QMainWindow):
             'SCORING': '#6bc3ff',
             'SHOWING_RESULT': '#f59af0',
         }.get(state, '#ecf2ff')
-        self.state_label.setStyleSheet(f'color: {state_color}; font-size: 19px; font-weight: 600;')
+        self.state_text.setStyleSheet(f'font-size: 12px; font-weight: 700; color: {state_color};')
 
         is_scoring = state == 'SCORING'
         self.next_btn.setDisabled(is_scoring)
@@ -827,42 +733,6 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 comment = '많이 멀었네요. 다음 라운드에 도전하세요!'
 
-        self.score_label.setText(str(score))
-        if status == 'FAIL':
-            self.score_label.setStyleSheet('color: #ff8f8f; font-size: 42px; font-weight: 700;')
-        elif score >= 4000:
-            self.score_label.setStyleSheet('color: #6df3a9; font-size: 42px; font-weight: 700;')
-        elif score >= 2000:
-            self.score_label.setStyleSheet('color: #ffd57a; font-size: 42px; font-weight: 700;')
-        else:
-            self.score_label.setStyleSheet('color: #ffb173; font-size: 42px; font-weight: 700;')
-
-        if dist_error is not None:
-            self.distance_label.setText(f'거리 오차: {float(dist_error):.2f} m')
-        else:
-            self.distance_label.setText('거리 오차: -')
-
-        if quality_pct is not None:
-            quality_text = f'정합 품질: {float(quality_pct):.1f}%'
-            if rmse is not None:
-                quality_text += f' (RMSE {float(rmse):.3f})'
-            self.quality_label.setText(quality_text)
-        elif fitness is not None:
-            quality_text = f'정합 품질: {float(fitness) * 100.0:.1f}%'
-            if rmse is not None:
-                quality_text += f' (RMSE {float(rmse):.3f})'
-            self.quality_label.setText(quality_text)
-        else:
-            self.quality_label.setText('정합 품질: -')
-
-        if elapsed_ms is not None:
-            self.elapsed_label.setText(f'처리 시간: {float(elapsed_ms):.0f} ms')
-        else:
-            self.elapsed_label.setText('처리 시간: -')
-
-        self.comment_label.setText(f'멘트: {comment}')
-        self.next_hint_label.setText('Next Round 버튼으로 다음 문제로 이동')
-
         clicked = result.get('clicked_xyz')
         gt = result.get('gt_xyz')
         self.canvas.set_result_points(clicked, gt)
@@ -879,11 +749,6 @@ class MainWindow(QtWidgets.QMainWindow):
             f'result score={score}, status={status}, dist={dist_error}, '
             f'quality={quality_pct if quality_pct is not None else fitness}, comment={comment}'
         )
-
-    @QtCore.Slot(int)
-    def on_query_ready(self, count):
-        if self.last_status_query_points is None:
-            self.query_label.setText(str(count))
 
     @QtCore.Slot(object)
     def on_aligned_ready(self, points):
@@ -909,7 +774,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def append_log(self, msg: str):
         ts = datetime.now().strftime('%H:%M:%S')
-        self.log_view.appendPlainText(f'[{ts}] {msg}')
+        self.node.get_logger().info(f'[{ts}] {msg}')
 
 
 def main():
@@ -921,7 +786,7 @@ def main():
     window = MainWindow(node, bridge)
     window.show()
 
-    spin_timer = QtCore.QTimer()
+    spin_timer = QtCore.QTimer() 
     spin_timer.timeout.connect(lambda: rclpy.spin_once(node, timeout_sec=0.0))
     spin_timer.start(20)
 
