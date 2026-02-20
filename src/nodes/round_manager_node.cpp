@@ -17,6 +17,7 @@
 #include "cloudguessr/backend/roi.hpp"
 #include "cloudguessr/backend/icp.hpp"
 #include "cloudguessr/backend/scoring.hpp"
+#include "cloudguessr/backend/feedback.hpp"
 #include "cloudguessr/backend/round_dataset.hpp"
 
 #include <nlohmann/json.hpp>
@@ -61,6 +62,12 @@ public:
     this->declare_parameter("click_debounce_ms", 300);
     this->declare_parameter("auto_advance", false);
     this->declare_parameter("result_display_sec", 5.0);
+    this->declare_parameter("score_perfect_radius_m", 1.5);
+    this->declare_parameter("score_distance_decay_m", 55.0);
+    this->declare_parameter("score_distance_exp", 0.9);
+    this->declare_parameter("score_distance_weight", 0.82);
+    this->declare_parameter("score_quality_weight", 0.18);
+    this->declare_parameter("score_saturation_threshold", 0.975);
 
     loadParameters();
 
@@ -145,6 +152,12 @@ private:
     click_debounce_ms_ = this->get_parameter("click_debounce_ms").as_int();
     auto_advance_ = this->get_parameter("auto_advance").as_bool();
     result_display_sec_ = this->get_parameter("result_display_sec").as_double();
+    score_perfect_radius_m_ = this->get_parameter("score_perfect_radius_m").as_double();
+    score_distance_decay_m_ = this->get_parameter("score_distance_decay_m").as_double();
+    score_distance_exp_ = this->get_parameter("score_distance_exp").as_double();
+    score_distance_weight_ = this->get_parameter("score_distance_weight").as_double();
+    score_quality_weight_ = this->get_parameter("score_quality_weight").as_double();
+    score_saturation_threshold_ = this->get_parameter("score_saturation_threshold").as_double();
 
     yaw_candidates_.clear();
     auto yaw_candidates_param = this->get_parameter("yaw_candidates_deg").as_integer_array();
@@ -362,10 +375,21 @@ private:
 
     // Override score with distance-based calculation (if not FAIL)
     if (score_result.status == "OK") {
-      score_result.score = cloudguessr::scoring::computeCompositeScore(
+      cloudguessr::feedback::ScoreModelConfig score_config;
+      score_config.fail_min_fitness = fail_min_fitness_;
+      score_config.fail_max_rmse = fail_max_rmse_;
+      score_config.perfect_radius_m = score_perfect_radius_m_;
+      score_config.distance_decay_m = score_distance_decay_m_;
+      score_config.distance_exp = score_distance_exp_;
+      score_config.distance_weight = score_distance_weight_;
+      score_config.quality_weight = score_quality_weight_;
+      score_config.saturation_threshold = score_saturation_threshold_;
+
+      score_result.score = cloudguessr::feedback::computeGameScore(
         dist_error,
         sweep_result.best_alignment.fitness,
-        sweep_result.best_alignment.rmse);
+        sweep_result.best_alignment.rmse,
+        score_config);
     }
 
     // 6. Publish aligned query for visualization
@@ -405,16 +429,27 @@ private:
     score_pub_->publish(score_msg);
 
     std::string comment;
+    json distance_band = nullptr;
+    json quality_band = nullptr;
+    std::string score_tier = cloudguessr::feedback::scoreTierToString(
+      cloudguessr::feedback::classifyScoreTier(score_result.score));
+    double quality_pct = 0.0;
+
     if (score_result.status != "OK") {
       comment = "실패: " + score_result.reason;
-    } else if (score_result.score >= 4000) {
-      comment = "훌륭합니다! 거의 정확한 위치입니다!";
-    } else if (score_result.score >= 2500) {
-      comment = "좋습니다! 꽤 가까운 위치입니다.";
-    } else if (score_result.score >= 1000) {
-      comment = "아쉽네요. 조금 멀었습니다.";
+      distance_band = nullptr;
+      quality_band = nullptr;
     } else {
-      comment = "많이 멀었네요. 다음 라운드에 도전하세요!";
+      quality_pct = cloudguessr::feedback::computeQualityPercent(
+        sweep_result.best_alignment.fitness,
+        sweep_result.best_alignment.rmse,
+        fail_min_fitness_,
+        fail_max_rmse_);
+      distance_band = cloudguessr::feedback::distanceBandToString(
+        cloudguessr::feedback::classifyDistanceBand(dist_error));
+      quality_band = cloudguessr::feedback::qualityBandToString(
+        cloudguessr::feedback::classifyQualityBand(quality_pct));
+      comment = cloudguessr::feedback::buildComment(dist_error, quality_pct);
     }
 
     // JSON result
@@ -430,7 +465,10 @@ private:
     result_json["elapsed_ms"] = elapsed_ms;
     result_json["status"] = score_result.status;
     result_json["reason"] = score_result.reason;
-    result_json["quality_pct"] = sweep_result.best_alignment.fitness * 100.0;
+    result_json["quality_pct"] = (score_result.status == "OK") ? json(quality_pct) : json(nullptr);
+    result_json["distance_band"] = distance_band;
+    result_json["quality_band"] = quality_band;
+    result_json["score_tier"] = score_tier;
     result_json["comment"] = comment;
 
     std_msgs::msg::String result_msg;
@@ -447,15 +485,14 @@ private:
     RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════╣");
     RCLCPP_INFO(this->get_logger(), "║  점수: %5d / 5000                  ║", score_result.score);
     RCLCPP_INFO(this->get_logger(), "║  거리 오차: %6.1f m                  ║", dist_error);
-    RCLCPP_INFO(this->get_logger(), "║  정합 품질: %.1f%%                     ║", sweep_result.best_alignment.fitness * 100);
     RCLCPP_INFO(this->get_logger(), "║  처리 시간: %.0f ms                   ║", elapsed_ms);
     RCLCPP_INFO(this->get_logger(), "╚══════════════════════════════════════╝");
 
     // HMI 로그 - 채점 결과
     char score_buf[256];
     snprintf(score_buf, sizeof(score_buf),
-      "점수: %d점 | 거리 오차: %.1fm | 정합 품질: %.1f%%",
-      score_result.score, dist_error, sweep_result.best_alignment.fitness * 100);
+      "점수: %d점 | 거리 오차: %.1fm",
+      score_result.score, dist_error);
     hmiLog(score_buf);
     if (score_result.status != "OK") {
       RCLCPP_WARN(this->get_logger(), "[결과] %s", comment.c_str());
@@ -484,6 +521,9 @@ private:
     result_json["rmse"] = nullptr;
     result_json["elapsed_ms"] = nullptr;
     result_json["quality_pct"] = nullptr;
+    result_json["distance_band"] = nullptr;
+    result_json["quality_band"] = nullptr;
+    result_json["score_tier"] = "C";
     result_json["score"] = 0;
     result_json["status"] = "FAIL";
     result_json["reason"] = reason;
@@ -627,6 +667,12 @@ private:
   int click_debounce_ms_;
   bool auto_advance_;
   double result_display_sec_;
+  double score_perfect_radius_m_;
+  double score_distance_decay_m_;
+  double score_distance_exp_;
+  double score_distance_weight_;
+  double score_quality_weight_;
+  double score_saturation_threshold_;
 
   // State
   GameState state_;

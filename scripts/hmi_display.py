@@ -34,8 +34,7 @@ class HMIDisplay(Node):
         self.last_score = 0
         self.last_status = ""
         self.last_dist_error = None
-        self.last_quality_pct = None
-        self.last_rmse = None
+        self.last_score_tier = None
         self.last_elapsed_ms = None
         self.last_comment = "-"
 
@@ -66,31 +65,12 @@ class HMIDisplay(Node):
             self.last_score = data.get('score', 0)
             self.last_status = data.get('status', '')
             self.last_dist_error = data.get('dist_error_m')
-            self.last_rmse = data.get('rmse')
+            self.last_score_tier = data.get('score_tier')
             self.last_elapsed_ms = data.get('elapsed_ms')
-
-            quality_pct = data.get('quality_pct')
-            fitness = data.get('fitness')
-            if quality_pct is not None:
-                self.last_quality_pct = float(quality_pct)
-            elif fitness is not None:
-                self.last_quality_pct = float(fitness) * 100.0
-            else:
-                self.last_quality_pct = None
 
             comment = str(data.get('comment', '') or '').strip()
             if not comment:
-                reason = data.get('reason', '')
-                if self.last_status != 'OK':
-                    comment = f'실패: {reason}' if reason else '정합 실패'
-                elif self.last_score >= 4000:
-                    comment = '훌륭합니다! 거의 정확한 위치입니다!'
-                elif self.last_score >= 2500:
-                    comment = '좋습니다! 꽤 가까운 위치입니다.'
-                elif self.last_score >= 1000:
-                    comment = '아쉽네요. 조금 멀었습니다.'
-                else:
-                    comment = '많이 멀었네요. 다음 라운드에 도전하세요!'
+                comment = '-'
             self.last_comment = comment
         except json.JSONDecodeError:
             pass
@@ -114,6 +94,25 @@ class HMIDisplay(Node):
         title.append("  CloudGuessr  ", style="bold white on blue")
         title.append("  Point Cloud Geo-Guesser Game  ", style="dim")
         return Panel(title, border_style="blue")
+
+    def _score_style(self) -> str:
+        if self.last_status == "FAIL":
+            return "bold red"
+        if self.last_score_tier == "S":
+            return "bold green"
+        if self.last_score_tier == "A":
+            return "bold yellow"
+        if self.last_score_tier == "B":
+            return "bold #ffb173"
+        if self.last_score_tier == "C":
+            return "bold #ff8c8c"
+        if self.last_score >= 4500:
+            return "bold green"
+        if self.last_score >= 3000:
+            return "bold yellow"
+        if self.last_score >= 1500:
+            return "bold #ffb173"
+        return "dim"
 
     def render_status(self) -> Panel:
         table = Table(show_header=False, box=None, expand=True)
@@ -141,18 +140,7 @@ class HMIDisplay(Node):
         elif diff_kr == "hard":
             diff_kr = "어려움"
 
-        # Score style
-        if self.last_status == "OK":
-            if self.last_score >= 4000:
-                score_style = "bold green"
-            elif self.last_score >= 2000:
-                score_style = "bold yellow"
-            else:
-                score_style = "bold red"
-        elif self.last_status == "FAIL":
-            score_style = "bold red"
-        else:
-            score_style = "dim"
+        score_style = self._score_style()
 
         table.add_row(
             f"[bold]ROUND[/]\n[white]{self.current_round}/{self.total_rounds}[/]",
@@ -181,27 +169,11 @@ class HMIDisplay(Node):
         table.add_column(justify="left", ratio=1)
         table.add_column(justify="left", ratio=1)
 
-        if self.last_status == "OK":
-            if self.last_score >= 4000:
-                score_style = "bold green"
-            elif self.last_score >= 2000:
-                score_style = "bold yellow"
-            else:
-                score_style = "bold red"
-        elif self.last_status == "FAIL":
-            score_style = "bold red"
-        else:
-            score_style = "dim"
+        score_style = self._score_style()
 
         dist_text = "-"
         if self.last_dist_error is not None:
             dist_text = f"{float(self.last_dist_error):.2f} m"
-
-        quality_text = "-"
-        if self.last_quality_pct is not None:
-            quality_text = f"{float(self.last_quality_pct):.1f}%"
-            if self.last_rmse is not None:
-                quality_text += f" / RMSE {float(self.last_rmse):.3f}"
 
         elapsed_text = "-"
         if self.last_elapsed_ms is not None:
@@ -212,8 +184,8 @@ class HMIDisplay(Node):
             f"[bold]거리 오차[/]\n[white]{dist_text}[/]",
         )
         table.add_row(
-            f"[bold]정합 품질[/]\n[white]{quality_text}[/]",
             f"[bold]처리 시간[/]\n[white]{elapsed_text}[/]",
+            "",
         )
         table.add_row(
             f"[bold]멘트[/]\n[white]{self.last_comment}[/]",

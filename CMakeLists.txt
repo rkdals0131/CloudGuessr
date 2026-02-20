@@ -38,6 +38,7 @@ add_library(cloudguessr_backend SHARED
   src/backend/roi.cpp
   src/backend/icp.cpp
   src/backend/scoring.cpp
+  src/backend/feedback.cpp
   src/backend/round_dataset.cpp
 )
 target_include_directories(cloudguessr_backend PUBLIC
@@ -105,6 +106,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_scoring test/unit/test_scoring.cpp)
   target_link_libraries(test_scoring cloudguessr_backend)
+
+  ament_add_gtest(test_feedback test/unit/test_feedback.cpp)
+  target_link_libraries(test_feedback cloudguessr_backend)
 
   ament_add_gtest(test_round_dataset test/unit/test_round_dataset.cpp)
   target_link_libraries(test_round_dataset cloudguessr_backend)

@@ -394,19 +394,15 @@ class MapCanvas(QtWidgets.QWidget):
         score: int,
         status: str,
         dist_error,
-        quality_pct,
-        fitness,
-        rmse,
         comment: str,
+        score_tier: str = None,
     ):
         self.overlay_data = {
             'score': int(score),
             'status': str(status),
             'dist_error': dist_error,
-            'quality_pct': quality_pct,
-            'fitness': fitness,
-            'rmse': rmse,
             'comment': str(comment or ''),
+            'score_tier': str(score_tier) if score_tier else None,
         }
         self.update()
 
@@ -420,9 +416,10 @@ class MapCanvas(QtWidgets.QWidget):
             return
 
         panel_w = min(620.0, max(320.0, self.width() - 48.0))
-        panel_h = 168.0
+        panel_h = 152.0
         panel_x = max(0.0, (self.width() - panel_w) * 0.5)
-        panel_y = max(0.0, (self.height() - panel_h) * 0.5)
+        # 상단바 바로 밑에서 약간의 여백(50px)을 두고 중앙 상단에 위치하도록 수정
+        panel_y = min(50.0, max(0.0, (self.height() - panel_h) * 0.5))
         panel_rect = QtCore.QRectF(panel_x, panel_y, panel_w, panel_h)
 
         painter.save()
@@ -433,14 +430,25 @@ class MapCanvas(QtWidgets.QWidget):
 
         score = int(data['score'])
         status = data['status']
+        score_tier = data.get('score_tier')
         if status == 'FAIL':
             score_color = QtGui.QColor(255, 140, 140)
-        elif score >= 4000:
+        elif score_tier == 'S':
             score_color = QtGui.QColor(110, 243, 169)
-        elif score >= 2000:
+        elif score_tier == 'A':
             score_color = QtGui.QColor(255, 213, 122)
-        else:
+        elif score_tier == 'B':
             score_color = QtGui.QColor(255, 177, 115)
+        elif score_tier == 'C':
+            score_color = QtGui.QColor(255, 140, 140)
+        elif score >= 4500:
+            score_color = QtGui.QColor(110, 243, 169)
+        elif score >= 3000:
+            score_color = QtGui.QColor(255, 213, 122)
+        elif score >= 1500:
+            score_color = QtGui.QColor(255, 177, 115)
+        else:
+            score_color = QtGui.QColor(255, 140, 140)
 
         score_font = QtGui.QFont()
         score_font.setPointSize(30)
@@ -467,27 +475,10 @@ class MapCanvas(QtWidgets.QWidget):
         else:
             dist_text = f'거리 오차: {float(dist_error):.2f} m'
 
-        quality_pct = data['quality_pct']
-        fitness = data['fitness']
-        rmse = data['rmse']
-        if quality_pct is not None:
-            quality_text = f'정합 품질: {float(quality_pct):.1f}%'
-        elif fitness is not None:
-            quality_text = f'정합 품질: {float(fitness) * 100.0:.1f}%'
-        else:
-            quality_text = '정합 품질: -'
-        if rmse is not None:
-            quality_text += f' (RMSE {float(rmse):.3f})'
-
         painter.drawText(
             QtCore.QRectF(panel_x + 18.0, panel_y + 66.0, panel_w - 36.0, 24.0),
             QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
             dist_text,
-        )
-        painter.drawText(
-            QtCore.QRectF(panel_x + 18.0, panel_y + 90.0, panel_w - 36.0, 24.0),
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
-            quality_text,
         )
 
         comment = str(data['comment'] or '').strip()
@@ -495,7 +486,7 @@ class MapCanvas(QtWidgets.QWidget):
             comment = '다음 라운드에 도전하세요!'
         painter.setPen(QtGui.QColor(245, 250, 255))
         painter.drawText(
-            QtCore.QRectF(panel_x + 18.0, panel_y + 116.0, panel_w - 36.0, 44.0),
+            QtCore.QRectF(panel_x + 18.0, panel_y + 96.0, panel_w - 36.0, 44.0),
             QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
             f'멘트: {comment}',
         )
@@ -723,24 +714,11 @@ class MainWindow(QtWidgets.QMainWindow):
         score = int(result.get('score', 0))
         status = result.get('status', '-')
         dist_error = result.get('dist_error_m')
-        quality_pct = result.get('quality_pct')
-        fitness = result.get('fitness')
-        rmse = result.get('rmse')
-        elapsed_ms = result.get('elapsed_ms')
-        reason = result.get('reason', '')
+        score_tier = result.get('score_tier')
         comment = str(result.get('comment', '') or '').strip()
 
         if not comment:
-            if status != 'OK':
-                comment = f'실패: {reason}' if reason else '정합 실패'
-            elif score >= 4000:
-                comment = '훌륭합니다! 거의 정확한 위치입니다!'
-            elif score >= 2500:
-                comment = '좋습니다! 꽤 가까운 위치입니다.'
-            elif score >= 1000:
-                comment = '아쉽네요. 조금 멀었습니다.'
-            else:
-                comment = '많이 멀었네요. 다음 라운드에 도전하세요!'
+            comment = '다음 라운드에 도전하세요!'
 
         clicked = result.get('clicked_xyz')
         gt = result.get('gt_xyz')
@@ -749,14 +727,14 @@ class MainWindow(QtWidgets.QMainWindow):
             score=score,
             status=status,
             dist_error=dist_error,
-            quality_pct=quality_pct,
-            fitness=fitness,
-            rmse=rmse,
             comment=comment,
+            score_tier=score_tier,
         )
+        distance_band = result.get('distance_band')
+        quality_band = result.get('quality_band')
         self.append_log(
-            f'result score={score}, status={status}, dist={dist_error}, '
-            f'quality={quality_pct if quality_pct is not None else fitness}, comment={comment}'
+            f'result score={score}, tier={score_tier}, status={status}, dist={dist_error}, '
+            f'distance_band={distance_band}, quality_band={quality_band}, comment={comment}'
         )
 
     @QtCore.Slot(object)
