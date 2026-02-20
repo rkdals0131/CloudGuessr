@@ -127,6 +127,7 @@ class HMIDisplay(Node):
             "IDLE": "dim",
             "LOADING": "yellow",
             "WAITING_CLICK": "green bold",
+            "ALIGNING": "bright_cyan bold",
             "SCORING": "cyan bold",
             "SHOWING_RESULT": "magenta bold",
         }.get(self.state, "white")

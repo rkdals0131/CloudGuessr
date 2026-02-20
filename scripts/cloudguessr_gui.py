@@ -421,8 +421,8 @@ class MapCanvas(QtWidgets.QWidget):
 
         panel_w = min(620.0, max(320.0, self.width() - 48.0))
         panel_h = 168.0
-        panel_x = 24.0
-        panel_y = 52.0
+        panel_x = max(0.0, (self.width() - panel_w) * 0.5)
+        panel_y = max(0.0, (self.height() - panel_h) * 0.5)
         panel_rect = QtCore.QRectF(panel_x, panel_y, panel_w, panel_h)
 
         painter.save()
@@ -616,7 +616,7 @@ class MainWindow(QtWidgets.QMainWindow):
         status_block.setSpacing(14)
         self.round_text = QtWidgets.QLabel('ROUND -/-')
         self.round_text.setObjectName('metaText')
-        self.state_text = QtWidgets.QLabel('STATE IDLE')
+        self.state_text = QtWidgets.QLabel('STATE 대기')
         self.state_text.setObjectName('stateText')
         self.diff_text = QtWidgets.QLabel('DIFFICULTY -')
         self.diff_text.setObjectName('metaText')
@@ -675,10 +675,18 @@ class MainWindow(QtWidgets.QMainWindow):
         state = status.get('state_str', '-')
         difficulty = status.get('difficulty', '-')
         notes = str(status.get('round_notes', '') or '').strip()
+        state_label = {
+            'IDLE': '대기',
+            'LOADING': '로딩중',
+            'WAITING_CLICK': '클릭 대기',
+            'ALIGNING': '연산중',
+            'SCORING': '채점중',
+            'SHOWING_RESULT': '결과 확인',
+        }.get(state, state)
 
         self.current_state = state
         self.round_text.setText(f'ROUND {round_idx}/{total_rounds}')
-        self.state_text.setText(f'STATE {state}')
+        self.state_text.setText(f'STATE {state_label}')
         self.diff_text.setText(f'DIFFICULTY {difficulty}')
         self.round_id_text.setText(f'ROUND ID {round_id}')
         note_text = notes if notes else '-'
@@ -700,12 +708,13 @@ class MainWindow(QtWidgets.QMainWindow):
             'IDLE': '#9fb2c7',
             'LOADING': '#f6c15c',
             'WAITING_CLICK': '#5be690',
+            'ALIGNING': '#2dd4bf',
             'SCORING': '#6bc3ff',
             'SHOWING_RESULT': '#f59af0',
         }.get(state, '#ecf2ff')
         self.state_text.setStyleSheet(f'font-size: 12px; font-weight: 700; color: {state_color};')
 
-        is_scoring = state == 'SCORING'
+        is_scoring = state in ('ALIGNING', 'SCORING')
         self.next_btn.setDisabled(is_scoring)
         self.reset_btn.setDisabled(is_scoring)
 

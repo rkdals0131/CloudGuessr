@@ -31,6 +31,7 @@ enum class GameState
   IDLE,
   LOADING,
   WAITING_CLICK,
+  ALIGNING,
   SCORING,
   SHOWING_RESULT
 };
@@ -296,7 +297,8 @@ private:
     last_click_initialized_ = true;
     last_click_time_ = now;
 
-    state_ = GameState::SCORING;
+    state_ = GameState::ALIGNING;
+    publishStatus();
 
     double clicked_x = msg->point.x;
     double clicked_y = msg->point.y;
@@ -305,12 +307,12 @@ private:
     RCLCPP_INFO(this->get_logger(), "");
     RCLCPP_INFO(this->get_logger(), "────────────────────────────────────────");
     RCLCPP_INFO(this->get_logger(), "[클릭 수신] 위치: (%.1f, %.1f, %.1f)", clicked_x, clicked_y, clicked_z);
-    RCLCPP_INFO(this->get_logger(), "[채점 중] ICP 정합 수행 중...");
+    RCLCPP_INFO(this->get_logger(), "[연산 중] ICP 정합 수행 중...");
 
     char buf[128];
     snprintf(buf, sizeof(buf), "클릭 위치: (%.1f, %.1f, %.1f)", clicked_x, clicked_y, clicked_z);
     hmiLog(buf);
-    hmiLog("채점 중... ICP 정합 수행 중...");
+    hmiLog("연산 중... ICP 정합 수행 중...");
 
     // Run scoring pipeline
     auto start = std::chrono::high_resolution_clock::now();
@@ -334,6 +336,9 @@ private:
     auto sweep_result = cloudguessr::icp::yawSweepAlign(
       roi, current_query_, center, yaw_candidates_,
       icp_max_iter_, icp_max_corr_dist_);
+
+    state_ = GameState::SCORING;
+    publishStatus();
 
     auto end = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -560,8 +565,8 @@ private:
   {
     const std::string & command = msg->data;
     if (command == "next_round") {
-      if (state_ == GameState::SCORING) {
-        RCLCPP_WARN(this->get_logger(), "[명령] SCORING 중에는 next_round를 처리하지 않습니다.");
+      if (state_ == GameState::ALIGNING || state_ == GameState::SCORING) {
+        RCLCPP_WARN(this->get_logger(), "[명령] ALIGNING/SCORING 중에는 next_round를 처리하지 않습니다.");
         return;
       }
       loadRound(current_round_idx_ + 1);
@@ -569,8 +574,8 @@ private:
     }
 
     if (command == "reset_round") {
-      if (state_ == GameState::SCORING) {
-        RCLCPP_WARN(this->get_logger(), "[명령] SCORING 중에는 reset_round를 처리하지 않습니다.");
+      if (state_ == GameState::ALIGNING || state_ == GameState::SCORING) {
+        RCLCPP_WARN(this->get_logger(), "[명령] ALIGNING/SCORING 중에는 reset_round를 처리하지 않습니다.");
         return;
       }
       loadRound(current_round_idx_);
@@ -597,6 +602,7 @@ private:
       case GameState::IDLE: state_str = "IDLE"; break;
       case GameState::LOADING: state_str = "LOADING"; break;
       case GameState::WAITING_CLICK: state_str = "WAITING_CLICK"; break;
+      case GameState::ALIGNING: state_str = "ALIGNING"; break;
       case GameState::SCORING: state_str = "SCORING"; break;
       case GameState::SHOWING_RESULT: state_str = "SHOWING_RESULT"; break;
     }
