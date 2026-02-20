@@ -6,6 +6,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <tuple>
 #include "cloudguessr/backend/scoring.hpp"
 
 class ScoringTest : public ::testing::Test {
@@ -70,6 +71,7 @@ TEST_F(ScoringTest, ClassifyResult_NotConverged_Fail) {
     0.9, 0.1, false, 1000, 500, min_fitness_, max_rmse_, min_points_);
   
   EXPECT_EQ(result.status, "FAIL");
+  EXPECT_EQ(result.score, 0);
   EXPECT_FALSE(result.reason.empty());
 }
 
@@ -79,6 +81,7 @@ TEST_F(ScoringTest, ClassifyResult_LowFitness_Fail) {
     0.1, 0.5, true, 1000, 500, min_fitness_, max_rmse_, min_points_);
   
   EXPECT_EQ(result.status, "FAIL");
+  EXPECT_EQ(result.score, 0);
   EXPECT_NE(result.reason.find("Fitness"), std::string::npos);
 }
 
@@ -88,6 +91,7 @@ TEST_F(ScoringTest, ClassifyResult_HighRmse_Fail) {
     0.8, 5.0, true, 1000, 500, min_fitness_, max_rmse_, min_points_);
   
   EXPECT_EQ(result.status, "FAIL");
+  EXPECT_EQ(result.score, 0);
   EXPECT_NE(result.reason.find("RMSE"), std::string::npos);
 }
 
@@ -97,6 +101,7 @@ TEST_F(ScoringTest, ClassifyResult_InsufficientPoints_Fail) {
     0.9, 0.1, true, 50, 500, min_fitness_, max_rmse_, min_points_);
   
   EXPECT_EQ(result.status, "FAIL");
+  EXPECT_EQ(result.score, 0);
   EXPECT_NE(result.reason.find("ROI"), std::string::npos);
 }
 
@@ -129,6 +134,17 @@ TEST_F(ScoringTest, CalculateDistanceError_3D) {
 
   // Expected: sqrt(1 + 4 + 4) = 3.0
   EXPECT_NEAR(error, 3.0, 1e-6);
+}
+
+TEST_F(ScoringTest, CalculateDistanceError2D_IgnoresZ) {
+  std::vector<double> clicked = {0.0, 0.0, 10.0};
+  std::vector<double> gt = {3.0, 4.0, -50.0};
+
+  double error_2d = cloudguessr::scoring::calculateDistanceError2D(clicked, gt);
+  double error_3d = cloudguessr::scoring::calculateDistanceError(clicked, gt);
+
+  EXPECT_NEAR(error_2d, 5.0, 1e-6);
+  EXPECT_GT(error_3d, error_2d);
 }
 
 // UT-SCORE-03: Distance-based scoring tests (power function, max_distance=350)
@@ -191,6 +207,40 @@ TEST_F(ScoringTest, ComputeScoreFromDistance_ExpectedValues) {
   EXPECT_EQ(score_3, 5000);
   EXPECT_GT(score_10, 3900);   // 10m 오차 -> ~3954점
   EXPECT_GT(score_100, 1900);  // 100m 오차 -> ~2007점
+}
+
+TEST_F(ScoringTest, ComputeCompositeScore_InValidRange) {
+  std::vector<std::tuple<double, double, double>> cases = {
+    {0.0, 1.0, 0.1},
+    {10.0, 0.8, 0.5},
+    {100.0, 0.4, 1.5},
+    {350.0, 0.0, 5.0},
+  };
+
+  for (const auto& [distance, fitness, rmse] : cases) {
+    int score = cloudguessr::scoring::computeCompositeScore(distance, fitness, rmse);
+    EXPECT_GE(score, 0);
+    EXPECT_LE(score, 5000);
+  }
+}
+
+TEST_F(ScoringTest, ComputeCompositeScore_DistanceMonotonic) {
+  int score_near = cloudguessr::scoring::computeCompositeScore(5.0, 0.8, 0.5);
+  int score_mid = cloudguessr::scoring::computeCompositeScore(50.0, 0.8, 0.5);
+  int score_far = cloudguessr::scoring::computeCompositeScore(150.0, 0.8, 0.5);
+
+  EXPECT_GT(score_near, score_mid);
+  EXPECT_GT(score_mid, score_far);
+}
+
+TEST_F(ScoringTest, ComputeCompositeScore_QualityEffects) {
+  int score_low_fit = cloudguessr::scoring::computeCompositeScore(20.0, 0.35, 0.5);
+  int score_high_fit = cloudguessr::scoring::computeCompositeScore(20.0, 0.95, 0.5);
+  EXPECT_GT(score_high_fit, score_low_fit);
+
+  int score_low_rmse = cloudguessr::scoring::computeCompositeScore(20.0, 0.8, 0.3);
+  int score_high_rmse = cloudguessr::scoring::computeCompositeScore(20.0, 0.8, 2.5);
+  EXPECT_GT(score_low_rmse, score_high_rmse);
 }
 
 int main(int argc, char **argv) {

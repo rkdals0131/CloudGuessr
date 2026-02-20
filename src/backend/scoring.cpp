@@ -5,6 +5,14 @@
 namespace cloudguessr {
 namespace scoring {
 
+namespace {
+
+double clamp01(double value) {
+  return std::max(0.0, std::min(1.0, value));
+}
+
+}  // namespace
+
 int computeScore(double fitness, 
                  double rmse, 
                  double elapsed_ms,
@@ -76,7 +84,7 @@ ScoreResult classifyResult(double fitness,
     result.status = "FAIL";
     result.reason = "Fitness below threshold (" + std::to_string(fitness) + 
                     " < " + std::to_string(min_fitness) + ")";
-    result.score = computeScore(fitness, rmse);
+    result.score = 0;
     return result;
   }
 
@@ -85,7 +93,7 @@ ScoreResult classifyResult(double fitness,
     result.status = "FAIL";
     result.reason = "RMSE above threshold (" + std::to_string(rmse) + 
                     " > " + std::to_string(max_rmse) + ")";
-    result.score = computeScore(fitness, rmse);
+    result.score = 0;
     return result;
   }
 
@@ -105,6 +113,17 @@ double calculateDistanceError(const std::vector<double>& clicked_xyz,
   double dz = clicked_xyz[2] - gt_xyz[2];
 
   return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+double calculateDistanceError2D(const std::vector<double>& clicked_xyz,
+                                const std::vector<double>& gt_xyz) {
+  if (clicked_xyz.size() < 2 || gt_xyz.size() < 2) {
+    return 0.0;
+  }
+
+  double dx = clicked_xyz[0] - gt_xyz[0];
+  double dy = clicked_xyz[1] - gt_xyz[1];
+  return std::sqrt(dx * dx + dy * dy);
 }
 
 int computeScoreFromDistance(double distance_m,
@@ -130,6 +149,35 @@ int computeScoreFromDistance(double distance_m,
   final_score = std::max(0.0, std::min(5000.0, final_score));
 
   return static_cast<int>(std::round(final_score));
+}
+
+int computeCompositeScore(double distance_m,
+                          double fitness,
+                          double rmse,
+                          double max_distance,
+                          double perfect_range) {
+  if (max_distance <= 0.0) {
+    max_distance = 350.0;
+  }
+  if (perfect_range < 0.0) {
+    perfect_range = 0.0;
+  }
+
+  // Distance term follows the same smooth-decay profile as distance-only scoring.
+  const double effective_distance = std::max(0.0, distance_m - perfect_range);
+  const double ratio = clamp01(effective_distance / max_distance);
+  const double distance_term = clamp01(1.0 - std::pow(ratio, 0.4));
+
+  // Normalize ICP quality into 0~1 using default FAIL thresholds as anchors.
+  const double fitness_term = clamp01((fitness - 0.3) / 0.7);
+  const double rmse_term = clamp01((2.0 - rmse) / 2.0);
+
+  // Weighted blend: location is primary, ICP quality is secondary.
+  const double quality = clamp01(0.65 * distance_term +
+                                 0.25 * fitness_term +
+                                 0.10 * rmse_term);
+  const double score = 5000.0 * quality;
+  return static_cast<int>(std::round(score));
 }
 
 }  // namespace scoring

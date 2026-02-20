@@ -20,6 +20,7 @@
 #include "cloudguessr/backend/round_dataset.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 
@@ -38,10 +39,14 @@ class RoundManagerNode : public rclcpp::Node
 {
 public:
   RoundManagerNode()
-  : Node("cloudguessr_round_manager"), state_(GameState::IDLE), current_round_idx_(0)
+  : Node("cloudguessr_round_manager"),
+    state_(GameState::IDLE),
+    current_round_idx_(0),
+    last_click_initialized_(false)
   {
     // Parameters
     this->declare_parameter("map_file", "");
+    this->declare_parameter("map_frame", "map");
     this->declare_parameter("rounds_dir", "");
     this->declare_parameter("roi_radius", 20.0);
     this->declare_parameter("voxel_size", 0.5);
@@ -49,6 +54,10 @@ public:
     this->declare_parameter("icp_max_corr_dist", 2.0);
     this->declare_parameter("fail_min_fitness", 0.3);
     this->declare_parameter("fail_max_rmse", 2.0);
+    this->declare_parameter("yaw_candidates_deg",
+      std::vector<int64_t>{0, 45, 90, 135, 180, 225, 270, 315});
+    this->declare_parameter("use_xy_distance", true);
+    this->declare_parameter("click_debounce_ms", 300);
     this->declare_parameter("auto_advance", false);
     this->declare_parameter("result_display_sec", 5.0);
 
@@ -76,9 +85,6 @@ public:
     RCLCPP_INFO(this->get_logger(), "[초기화] 총 %zu개 라운드 발견", round_dirs_.size());
     std::sort(round_dirs_.begin(), round_dirs_.end());
 
-    // Yaw candidates
-    yaw_candidates_ = {0, 45, 90, 135, 180, 225, 270, 315};
-
     // Publishers
     score_pub_ = this->create_publisher<std_msgs::msg::Int32>("/cloudguessr/score", 10);
     result_pub_ = this->create_publisher<std_msgs::msg::String>("/cloudguessr/result", 10);
@@ -98,6 +104,10 @@ public:
     click_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
       "/clicked_point", 10,
       std::bind(&RoundManagerNode::onClickedPoint, this, std::placeholders::_1));
+
+    command_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/cloudguessr/command", 10,
+      std::bind(&RoundManagerNode::onCommand, this, std::placeholders::_1));
 
     viewer_ready_sub_ = this->create_subscription<std_msgs::msg::String>(
       "/cloudguessr/viewer_ready", 10,
@@ -119,6 +129,7 @@ private:
   void loadParameters()
   {
     map_file_ = this->get_parameter("map_file").as_string();
+    map_frame_ = this->get_parameter("map_frame").as_string();
     rounds_dir_ = this->get_parameter("rounds_dir").as_string();
     roi_radius_ = this->get_parameter("roi_radius").as_double();
     voxel_size_ = this->get_parameter("voxel_size").as_double();
@@ -126,8 +137,19 @@ private:
     icp_max_corr_dist_ = this->get_parameter("icp_max_corr_dist").as_double();
     fail_min_fitness_ = this->get_parameter("fail_min_fitness").as_double();
     fail_max_rmse_ = this->get_parameter("fail_max_rmse").as_double();
+    use_xy_distance_ = this->get_parameter("use_xy_distance").as_bool();
+    click_debounce_ms_ = this->get_parameter("click_debounce_ms").as_int();
     auto_advance_ = this->get_parameter("auto_advance").as_bool();
     result_display_sec_ = this->get_parameter("result_display_sec").as_double();
+
+    yaw_candidates_.clear();
+    auto yaw_candidates_param = this->get_parameter("yaw_candidates_deg").as_integer_array();
+    for (auto v : yaw_candidates_param) {
+      yaw_candidates_.push_back(static_cast<double>(v));
+    }
+    if (yaw_candidates_.empty()) {
+      yaw_candidates_ = {0, 45, 90, 135, 180, 225, 270, 315};
+    }
   }
 
   void loadRound(size_t idx)
@@ -220,7 +242,7 @@ private:
     // Publish as PointCloud2 (in map frame for RViz visualization)
     sensor_msgs::msg::PointCloud2 aligned_msg;
     pcl::toROSMsg(*aligned_cloud, aligned_msg);
-    aligned_msg.header.frame_id = "map";
+    aligned_msg.header.frame_id = map_frame_;
     aligned_msg.header.stamp = this->now();
     aligned_query_pub_->publish(aligned_msg);
 
@@ -240,6 +262,31 @@ private:
       RCLCPP_WARN(this->get_logger(), "[대기] 아직 준비 중입니다. 잠시 후 다시 클릭하세요.");
       return;
     }
+
+    if (msg->header.frame_id != map_frame_) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "[입력 무효] clicked_point frame_id(%s) != map_frame(%s)",
+        msg->header.frame_id.c_str(),
+        map_frame_.c_str());
+      publishFailResult("clicked_point frame_id mismatch", msg->point.x, msg->point.y, msg->point.z);
+      return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if (last_click_initialized_) {
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_click_time_).count();
+      if (elapsed_ms < click_debounce_ms_) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "[디바운스] %lldms 이내 중복 클릭 무시 (임계: %dms)",
+          static_cast<long long>(elapsed_ms),
+          click_debounce_ms_);
+        return;
+      }
+    }
+    last_click_initialized_ = true;
+    last_click_time_ = now;
 
     state_ = GameState::SCORING;
 
@@ -286,7 +333,9 @@ private:
     // 4. Calculate distance error first (primary scoring factor)
     std::vector<double> clicked = {clicked_x, clicked_y, clicked_z};
     std::vector<double> gt = {current_meta_.gt_x, current_meta_.gt_y, current_meta_.gt_z};
-    double dist_error = cloudguessr::scoring::calculateDistanceError(clicked, gt);
+    double dist_error = use_xy_distance_
+      ? cloudguessr::scoring::calculateDistanceError2D(clicked, gt)
+      : cloudguessr::scoring::calculateDistanceError(clicked, gt);
 
     // 5. Classify result (for FAIL detection) and compute distance-based score
     auto score_result = cloudguessr::scoring::classifyResult(
@@ -300,8 +349,10 @@ private:
 
     // Override score with distance-based calculation (if not FAIL)
     if (score_result.status == "OK") {
-      score_result.score = cloudguessr::scoring::computeScoreFromDistance(
-        dist_error, sweep_result.best_alignment.fitness);
+      score_result.score = cloudguessr::scoring::computeCompositeScore(
+        dist_error,
+        sweep_result.best_alignment.fitness,
+        sweep_result.best_alignment.rmse);
     }
 
     // 6. Publish aligned query for visualization
@@ -431,7 +482,7 @@ private:
 
     // Clicked position (red)
     visualization_msgs::msg::Marker click_marker;
-    click_marker.header.frame_id = "map";
+    click_marker.header.frame_id = map_frame_;
     click_marker.header.stamp = this->now();
     click_marker.ns = "cloudguessr";
     click_marker.id = 0;
@@ -458,7 +509,7 @@ private:
 
     // Line between them
     visualization_msgs::msg::Marker line_marker;
-    line_marker.header.frame_id = "map";
+    line_marker.header.frame_id = map_frame_;
     line_marker.header.stamp = this->now();
     line_marker.ns = "cloudguessr";
     line_marker.id = 2;
@@ -485,6 +536,30 @@ private:
     delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
     markers.markers.push_back(delete_all);
     marker_pub_->publish(markers);
+  }
+
+  void onCommand(const std_msgs::msg::String::SharedPtr msg)
+  {
+    const std::string & command = msg->data;
+    if (command == "next_round") {
+      if (state_ == GameState::SCORING) {
+        RCLCPP_WARN(this->get_logger(), "[명령] SCORING 중에는 next_round를 처리하지 않습니다.");
+        return;
+      }
+      loadRound(current_round_idx_ + 1);
+      return;
+    }
+
+    if (command == "reset_round") {
+      if (state_ == GameState::SCORING) {
+        RCLCPP_WARN(this->get_logger(), "[명령] SCORING 중에는 reset_round를 처리하지 않습니다.");
+        return;
+      }
+      loadRound(current_round_idx_);
+      return;
+    }
+
+    RCLCPP_WARN(this->get_logger(), "[명령] 알 수 없는 command: %s", command.c_str());
   }
 
   void publishStatus()
@@ -514,6 +589,7 @@ private:
 
   // Parameters
   std::string map_file_;
+  std::string map_frame_;
   std::string rounds_dir_;
   double roi_radius_;
   double voxel_size_;
@@ -521,6 +597,8 @@ private:
   double icp_max_corr_dist_;
   double fail_min_fitness_;
   double fail_max_rmse_;
+  bool use_xy_distance_;
+  int click_debounce_ms_;
   bool auto_advance_;
   double result_display_sec_;
 
@@ -533,6 +611,8 @@ private:
   cloudguessr::PointCloudPtr score_map_;
   std::vector<std::string> round_dirs_;
   std::vector<double> yaw_candidates_;
+  std::chrono::steady_clock::time_point last_click_time_;
+  bool last_click_initialized_;
 
   // ROS
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr score_pub_;
@@ -543,6 +623,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_query_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr hmi_log_pub_;
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr click_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr command_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr viewer_ready_sub_;
   rclcpp::TimerBase::SharedPtr status_timer_;
   rclcpp::TimerBase::SharedPtr result_timer_;

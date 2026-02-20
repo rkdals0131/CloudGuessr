@@ -141,4 +141,15 @@ install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
+install(DIRECTORY data/
+  DESTINATION share/${PROJECT_NAME}/data
+)
+
+install(PROGRAMS
+  scripts/query_viewer.py
+  scripts/hmi_display.py
+  scripts/cloudguessr_gui.py
+  DESTINATION share/${PROJECT_NAME}/scripts
+)
+
 ament_package()

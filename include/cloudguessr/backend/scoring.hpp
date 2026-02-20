@@ -51,6 +51,15 @@ double calculateDistanceError(const std::vector<double>& clicked_xyz,
                               const std::vector<double>& gt_xyz);
 
 /**
+ * @brief Calculate horizontal distance error (XY only)
+ * @param clicked_xyz Clicked position
+ * @param gt_xyz Ground truth position
+ * @return 2D Euclidean distance in meters
+ */
+double calculateDistanceError2D(const std::vector<double>& clicked_xyz,
+                                const std::vector<double>& gt_xyz);
+
+/**
  * @brief Compute score based on distance error (primary) and fitness (secondary)
  *
  * Score formula: 5000 * (1 - (effective_distance / max_distance)^0.4) * fitness_bonus
@@ -66,6 +75,25 @@ double calculateDistanceError(const std::vector<double>& clicked_xyz,
 int computeScoreFromDistance(double distance_m,
                              double fitness = 1.0,
                              double max_distance = 350.0);
+
+/**
+ * @brief Compute mixed score from distance and ICP quality
+ *
+ * quality = w_d * distance_term + w_f * fitness_term + w_r * rmse_term
+ * score = round(5000 * quality)
+ *
+ * @param distance_m Distance error in meters (typically XY)
+ * @param fitness ICP inlier ratio
+ * @param rmse ICP RMSE
+ * @param max_distance Distance normalization radius (default 350m)
+ * @param perfect_range Perfect-score distance threshold (default 3m)
+ * @return Score 0~5000
+ */
+int computeCompositeScore(double distance_m,
+                          double fitness,
+                          double rmse,
+                          double max_distance = 350.0,
+                          double perfect_range = 3.0);
 
 }  // namespace scoring
 }  // namespace cloudguessr

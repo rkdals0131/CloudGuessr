@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""
+CloudGuessr Desktop GUI (PySide6)
+
+- Subscribes: /cloudguessr/map, /cloudguessr/status, /cloudguessr/result, /cloudguessr/query
+- Publishes:  /clicked_point, /cloudguessr/command
+"""
+
+import json
+import sys
+from datetime import datetime
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PointStamped
+from rclpy.node import Node
+from sensor_msgs.msg import PointCloud2
+import sensor_msgs_py.point_cloud2 as pc2
+from std_msgs.msg import String
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
+
+class RosBridge(QtCore.QObject):
+    map_ready = QtCore.Signal(object)
+    status_ready = QtCore.Signal(dict)
+    result_ready = QtCore.Signal(dict)
+    query_ready = QtCore.Signal(int)
+    log_ready = QtCore.Signal(str)
+
+
+class CloudGuessrGuiNode(Node):
+    def __init__(self, bridge: RosBridge):
+        super().__init__("cloudguessr_gui")
+        self.bridge = bridge
+
+        self.clicked_pub = self.create_publisher(PointStamped, "/clicked_point", 10)
+        self.command_pub = self.create_publisher(String, "/cloudguessr/command", 10)
+
+        self.create_subscription(PointCloud2, "/cloudguessr/map", self.on_map, 10)
+        self.create_subscription(String, "/cloudguessr/status", self.on_status, 10)
+        self.create_subscription(String, "/cloudguessr/result", self.on_result, 10)
+        self.create_subscription(PointCloud2, "/cloudguessr/query", self.on_query, 10)
+
+        self.get_logger().info("CloudGuessr desktop GUI node started")
+
+    def on_map(self, msg: PointCloud2):
+        total_points = int(msg.width) * int(msg.height)
+        if total_points <= 0:
+            return
+
+        max_render_points = 30000
+        stride = max(1, total_points // max_render_points)
+        sampled = []
+        for idx, p in enumerate(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)):
+            if idx % stride == 0:
+                sampled.append((float(p[0]), float(p[1]), float(p[2])))
+
+        if not sampled:
+            return
+
+        map_points = np.asarray(sampled, dtype=np.float32)
+        self.bridge.map_ready.emit(map_points)
+
+    def on_status(self, msg: String):
+        try:
+            status = json.loads(msg.data)
+            self.bridge.status_ready.emit(status)
+        except json.JSONDecodeError:
+            self.bridge.log_ready.emit("status JSON parse failed")
+
+    def on_result(self, msg: String):
+        try:
+            result = json.loads(msg.data)
+            self.bridge.result_ready.emit(result)
+        except json.JSONDecodeError:
+            self.bridge.log_ready.emit("result JSON parse failed")
+
+    def on_query(self, msg: PointCloud2):
+        count = int(msg.width) * int(msg.height)
+        self.bridge.query_ready.emit(count)
+
+    def publish_click(self, x: float, y: float, z: float):
+        msg = PointStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "map"
+        msg.point.x = float(x)
+        msg.point.y = float(y)
+        msg.point.z = float(z)
+        self.clicked_pub.publish(msg)
+
+    def publish_command(self, command: str):
+        msg = String()
+        msg.data = command
+        self.command_pub.publish(msg)
+
+
+class MapCanvas(QtWidgets.QWidget):
+    map_clicked = QtCore.Signal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(900, 700)
+        self.map_points = None
+        self.clicked_point = None
+        self.gt_point = None
+        self.bounds = None
+
+    def set_map_points(self, points: np.ndarray):
+        self.map_points = points
+        min_x = float(np.min(points[:, 0]))
+        max_x = float(np.max(points[:, 0]))
+        min_y = float(np.min(points[:, 1]))
+        max_y = float(np.max(points[:, 1]))
+
+        # Keep non-zero bounds for robust coordinate transforms.
+        if abs(max_x - min_x) < 1e-6:
+            max_x += 1.0
+        if abs(max_y - min_y) < 1e-6:
+            max_y += 1.0
+        self.bounds = (min_x, max_x, min_y, max_y)
+        self.update()
+
+    def set_result_points(self, clicked_xyz, gt_xyz):
+        if clicked_xyz and len(clicked_xyz) >= 2:
+            self.clicked_point = (float(clicked_xyz[0]), float(clicked_xyz[1]))
+        if gt_xyz and len(gt_xyz) >= 2:
+            self.gt_point = (float(gt_xyz[0]), float(gt_xyz[1]))
+        self.update()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent):
+        if event.button() != QtCore.Qt.LeftButton or self.bounds is None:
+            return
+        x, y = self._screen_to_world(event.position())
+        self.map_clicked.emit(x, y)
+
+    def paintEvent(self, event):
+        del event
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), QtGui.QColor(20, 24, 30))
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        if self.map_points is None or self.bounds is None:
+            painter.setPen(QtGui.QColor(190, 200, 215))
+            painter.drawText(self.rect(), QtCore.Qt.AlignCenter, "Waiting for /cloudguessr/map ...")
+            return
+
+        painter.setPen(QtGui.QPen(QtGui.QColor(115, 130, 145), 1))
+        for p in self.map_points:
+            sx, sy = self._world_to_screen(float(p[0]), float(p[1]))
+            painter.drawPoint(QtCore.QPointF(sx, sy))
+
+        if self.clicked_point and self.gt_point:
+            c_sx, c_sy = self._world_to_screen(*self.clicked_point)
+            g_sx, g_sy = self._world_to_screen(*self.gt_point)
+            painter.setPen(QtGui.QPen(QtGui.QColor(250, 220, 90), 2))
+            painter.drawLine(c_sx, c_sy, g_sx, g_sy)
+
+        if self.clicked_point:
+            c_sx, c_sy = self._world_to_screen(*self.clicked_point)
+            painter.setBrush(QtGui.QColor(255, 80, 80))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawEllipse(QtCore.QPointF(c_sx, c_sy), 6, 6)
+
+        if self.gt_point:
+            g_sx, g_sy = self._world_to_screen(*self.gt_point)
+            painter.setBrush(QtGui.QColor(80, 230, 90))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawEllipse(QtCore.QPointF(g_sx, g_sy), 6, 6)
+
+        painter.setPen(QtGui.QColor(160, 180, 205))
+        painter.drawText(
+            QtCore.QRectF(18, 12, self.width() - 36, 28),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            'Map Canvas: 클릭하여 정답 위치를 제출하세요',
+        )
+
+    def _world_to_screen(self, x: float, y: float):
+        min_x, max_x, min_y, max_y = self.bounds
+        margin = 24.0
+        w = max(1.0, self.width() - 2.0 * margin)
+        h = max(1.0, self.height() - 2.0 * margin)
+
+        nx = (x - min_x) / (max_x - min_x)
+        ny = (y - min_y) / (max_y - min_y)
+        sx = margin + nx * w
+        sy = margin + (1.0 - ny) * h
+        return sx, sy
+
+    def _screen_to_world(self, pos: QtCore.QPointF):
+        min_x, max_x, min_y, max_y = self.bounds
+        margin = 24.0
+        w = max(1.0, self.width() - 2.0 * margin)
+        h = max(1.0, self.height() - 2.0 * margin)
+
+        nx = (pos.x() - margin) / w
+        ny = 1.0 - ((pos.y() - margin) / h)
+        nx = min(1.0, max(0.0, nx))
+        ny = min(1.0, max(0.0, ny))
+
+        x = min_x + nx * (max_x - min_x)
+        y = min_y + ny * (max_y - min_y)
+        return x, y
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self, node: CloudGuessrGuiNode, bridge: RosBridge):
+        super().__init__()
+        self.node = node
+        self.bridge = bridge
+        self.map_points = None
+        self.current_state = 'IDLE'
+
+        self.setWindowTitle('CloudGuessr - Game Console')
+        self.resize(1520, 920)
+        self.setStyleSheet(
+            '''
+            QMainWindow {
+                background-color: #0f141b;
+                color: #ecf2ff;
+            }
+            QLabel#title {
+                font-size: 30px;
+                font-weight: 700;
+                color: #ffffff;
+            }
+            QLabel#subtitle {
+                font-size: 13px;
+                color: #9fb2c7;
+            }
+            QFrame#card {
+                background-color: #151c25;
+                border: 1px solid #283748;
+                border-radius: 10px;
+            }
+            QLabel#metricTitle {
+                font-size: 11px;
+                color: #9fb2c7;
+            }
+            QLabel#metricValue {
+                font-size: 19px;
+                font-weight: 600;
+                color: #f4f7ff;
+            }
+            QLabel#scoreValue {
+                font-size: 42px;
+                font-weight: 700;
+                color: #6df3a9;
+            }
+            QLabel#hint {
+                font-size: 12px;
+                color: #99b4d1;
+            }
+            QPushButton {
+                background-color: #2a3c52;
+                border: 1px solid #3f5976;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #eef6ff;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #355170;
+            }
+            QPushButton:disabled {
+                color: #6e7d8f;
+                background-color: #1d2732;
+                border: 1px solid #273545;
+            }
+            QPlainTextEdit {
+                background-color: #0f151d;
+                color: #d8e5f4;
+                border: 1px solid #283748;
+                border-radius: 8px;
+            }
+            '''
+        )
+
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        root = QtWidgets.QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        header = QtWidgets.QFrame()
+        header.setObjectName('card')
+        header_layout = QtWidgets.QVBoxLayout(header)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        header_layout.setSpacing(2)
+
+        title = QtWidgets.QLabel('CloudGuessr')
+        title.setObjectName('title')
+        subtitle = QtWidgets.QLabel(
+            '메인 게임 GUI: 맵에서 클릭해 정답 제출 | Query 3D는 Open3D 보조 창에서 확인'
+        )
+        subtitle.setObjectName('subtitle')
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        root.addWidget(header)
+
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(10)
+        root.addLayout(body, stretch=1)
+
+        self.canvas = MapCanvas()
+        body.addWidget(self.canvas, stretch=3)
+
+        right = QtWidgets.QFrame()
+        right.setObjectName('card')
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.setContentsMargins(12, 12, 12, 12)
+        right_layout.setSpacing(10)
+        body.addWidget(right, stretch=1)
+
+        status_card = QtWidgets.QFrame()
+        status_card.setObjectName('card')
+        status_grid = QtWidgets.QGridLayout(status_card)
+        status_grid.setContentsMargins(10, 10, 10, 10)
+        status_grid.setHorizontalSpacing(8)
+        status_grid.setVerticalSpacing(4)
+
+        self.round_title = QtWidgets.QLabel('ROUND')
+        self.round_title.setObjectName('metricTitle')
+        self.round_label = QtWidgets.QLabel('-/-')
+        self.round_label.setObjectName('metricValue')
+
+        self.state_title = QtWidgets.QLabel('STATE')
+        self.state_title.setObjectName('metricTitle')
+        self.state_label = QtWidgets.QLabel('IDLE')
+        self.state_label.setObjectName('metricValue')
+
+        self.diff_title = QtWidgets.QLabel('DIFFICULTY')
+        self.diff_title.setObjectName('metricTitle')
+        self.diff_label = QtWidgets.QLabel('-')
+        self.diff_label.setObjectName('metricValue')
+
+        self.query_title = QtWidgets.QLabel('QUERY POINTS')
+        self.query_title.setObjectName('metricTitle')
+        self.query_label = QtWidgets.QLabel('-')
+        self.query_label.setObjectName('metricValue')
+
+        status_grid.addWidget(self.round_title, 0, 0)
+        status_grid.addWidget(self.state_title, 0, 1)
+        status_grid.addWidget(self.diff_title, 2, 0)
+        status_grid.addWidget(self.query_title, 2, 1)
+        status_grid.addWidget(self.round_label, 1, 0)
+        status_grid.addWidget(self.state_label, 1, 1)
+        status_grid.addWidget(self.diff_label, 3, 0)
+        status_grid.addWidget(self.query_label, 3, 1)
+        right_layout.addWidget(status_card)
+
+        score_card = QtWidgets.QFrame()
+        score_card.setObjectName('card')
+        score_layout = QtWidgets.QVBoxLayout(score_card)
+        score_layout.setContentsMargins(10, 10, 10, 10)
+        score_layout.setSpacing(4)
+
+        score_title = QtWidgets.QLabel('SCORE')
+        score_title.setObjectName('metricTitle')
+        self.score_label = QtWidgets.QLabel('0')
+        self.score_label.setObjectName('scoreValue')
+        self.result_status = QtWidgets.QLabel('Status: -')
+        self.result_status.setObjectName('hint')
+        self.error_label = QtWidgets.QLabel('Distance Error: -')
+        self.error_label.setObjectName('hint')
+        self.quality_label = QtWidgets.QLabel('Fitness / RMSE: -')
+        self.quality_label.setObjectName('hint')
+        self.reason_label = QtWidgets.QLabel('Reason: -')
+        self.reason_label.setObjectName('hint')
+        self.last_click_label = QtWidgets.QLabel('Last Click: -')
+        self.last_click_label.setObjectName('hint')
+        score_layout.addWidget(score_title)
+        score_layout.addWidget(self.score_label)
+        score_layout.addWidget(self.result_status)
+        score_layout.addWidget(self.error_label)
+        score_layout.addWidget(self.quality_label)
+        score_layout.addWidget(self.reason_label)
+        score_layout.addWidget(self.last_click_label)
+        right_layout.addWidget(score_card)
+
+        control_card = QtWidgets.QFrame()
+        control_card.setObjectName('card')
+        control_layout = QtWidgets.QVBoxLayout(control_card)
+        control_layout.setContentsMargins(10, 10, 10, 10)
+        control_layout.setSpacing(8)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.next_btn = QtWidgets.QPushButton('Next Round')
+        self.reset_btn = QtWidgets.QPushButton('Reset Round')
+        button_row.addWidget(self.next_btn)
+        button_row.addWidget(self.reset_btn)
+        self.help_label = QtWidgets.QLabel('맵 클릭으로 답 제출. SCORING 상태에서는 버튼이 잠깁니다.')
+        self.help_label.setObjectName('hint')
+        control_layout.addLayout(button_row)
+        control_layout.addWidget(self.help_label)
+        right_layout.addWidget(control_card)
+
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        right_layout.addWidget(self.log_view, stretch=1)
+
+        self.canvas.map_clicked.connect(self.on_map_clicked)
+        self.next_btn.clicked.connect(lambda: self.node.publish_command('next_round'))
+        self.reset_btn.clicked.connect(lambda: self.node.publish_command('reset_round'))
+
+        self.bridge.map_ready.connect(self.on_map_ready)
+        self.bridge.status_ready.connect(self.on_status_ready)
+        self.bridge.result_ready.connect(self.on_result_ready)
+        self.bridge.query_ready.connect(self.on_query_ready)
+        self.bridge.log_ready.connect(self.append_log)
+
+    @QtCore.Slot(object)
+    def on_map_ready(self, points):
+        self.map_points = points
+        self.canvas.set_map_points(points)
+        self.append_log(f'map updated: {len(points)} sampled points')
+
+    @QtCore.Slot(dict)
+    def on_status_ready(self, status):
+        round_idx = int(status.get('round_idx', 0)) + 1
+        total_rounds = int(status.get('total_rounds', 0))
+        state = status.get('state_str', '-')
+        difficulty = status.get('difficulty', '-')
+
+        self.current_state = state
+        self.round_label.setText(f'{round_idx}/{total_rounds}')
+        self.state_label.setText(state)
+        self.diff_label.setText(difficulty)
+
+        state_color = {
+            'IDLE': '#9fb2c7',
+            'LOADING': '#f6c15c',
+            'WAITING_CLICK': '#5be690',
+            'SCORING': '#6bc3ff',
+            'SHOWING_RESULT': '#f59af0',
+        }.get(state, '#ecf2ff')
+        self.state_label.setStyleSheet(f'color: {state_color}; font-size: 19px; font-weight: 600;')
+
+        is_scoring = state == 'SCORING'
+        self.next_btn.setDisabled(is_scoring)
+        self.reset_btn.setDisabled(is_scoring)
+
+    @QtCore.Slot(dict)
+    def on_result_ready(self, result):
+        score = int(result.get('score', 0))
+        status = result.get('status', '-')
+        dist_error = result.get('dist_error_m')
+        fitness = result.get('fitness')
+        rmse = result.get('rmse')
+        reason = result.get('reason', '')
+
+        self.score_label.setText(str(score))
+        if status == 'FAIL':
+            self.score_label.setStyleSheet('color: #ff8f8f; font-size: 42px; font-weight: 700;')
+        elif score >= 4000:
+            self.score_label.setStyleSheet('color: #6df3a9; font-size: 42px; font-weight: 700;')
+        elif score >= 2000:
+            self.score_label.setStyleSheet('color: #ffd57a; font-size: 42px; font-weight: 700;')
+        else:
+            self.score_label.setStyleSheet('color: #ffb173; font-size: 42px; font-weight: 700;')
+
+        self.result_status.setText(f'Status: {status}')
+        if dist_error is not None:
+            self.error_label.setText(f'Distance Error: {float(dist_error):.2f} m')
+        else:
+            self.error_label.setText('Distance Error: -')
+
+        if fitness is not None and rmse is not None:
+            self.quality_label.setText(f'Fitness / RMSE: {float(fitness):.3f} / {float(rmse):.3f}')
+        else:
+            self.quality_label.setText('Fitness / RMSE: -')
+
+        if reason:
+            self.reason_label.setText(f'Reason: {reason}')
+        else:
+            self.reason_label.setText('Reason: -')
+
+        clicked = result.get('clicked_xyz')
+        gt = result.get('gt_xyz')
+        self.canvas.set_result_points(clicked, gt)
+        self.append_log(f'result score={score}, status={status}')
+
+    @QtCore.Slot(int)
+    def on_query_ready(self, count):
+        self.query_label.setText(str(count))
+
+    @QtCore.Slot(float, float)
+    def on_map_clicked(self, x: float, y: float):
+        if self.current_state == 'SCORING':
+            self.append_log('ignored click while SCORING')
+            return
+
+        z = 0.0
+        if self.map_points is not None and len(self.map_points) > 0:
+            dx = self.map_points[:, 0] - x
+            dy = self.map_points[:, 1] - y
+            idx = int(np.argmin(dx * dx + dy * dy))
+            z = float(self.map_points[idx, 2])
+
+        self.node.publish_click(x, y, z)
+        self.last_click_label.setText(f'Last Click: ({x:.2f}, {y:.2f}, {z:.2f})')
+        self.append_log(f'clicked ({x:.2f}, {y:.2f}, {z:.2f}) -> published /clicked_point')
+
+    @QtCore.Slot(str)
+    def append_log(self, msg: str):
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.log_view.appendPlainText(f'[{ts}] {msg}')
+
+
+def main():
+    rclpy.init()
+    app = QtWidgets.QApplication(sys.argv)
+
+    bridge = RosBridge()
+    node = CloudGuessrGuiNode(bridge)
+    window = MainWindow(node, bridge)
+    window.show()
+
+    spin_timer = QtCore.QTimer()
+    spin_timer.timeout.connect(lambda: rclpy.spin_once(node, timeout_sec=0.0))
+    spin_timer.start(20)
+
+    def cleanup():
+        spin_timer.stop()
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
+
+    app.aboutToQuit.connect(cleanup)
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

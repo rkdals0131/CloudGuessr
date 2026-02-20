@@ -10,6 +10,8 @@ Usage:
 import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.conditions import IfCondition
+from launch.substitutions import PythonExpression
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -17,17 +19,28 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     pkg_dir = get_package_share_directory('cloudguessr')
+    ws_dir = os.path.abspath(os.path.join(pkg_dir, '..', '..', '..', '..'))
+    venv_python = os.path.join(ws_dir, '.venv', 'bin', 'python3')
+    py_exec = venv_python if os.path.exists(venv_python) else 'python3'
 
-    # Source directory (for data files)
-    src_dir = os.path.join(pkg_dir, '..', '..', '..', '..', 'src', 'cloudguessr')
+    data_dir = os.path.join(pkg_dir, 'data')
+    scripts_dir = os.path.join(pkg_dir, 'scripts')
+    config_dir = os.path.join(pkg_dir, 'config')
 
     # Default paths
-    default_map_vis = os.path.join(src_dir, 'data', 'campus_q16.pcd')
-    default_map_score = os.path.join(src_dir, 'data', 'campus_q8.pcd')
-    default_rounds_dir = os.path.join(src_dir, 'data', 'rounds')
-    query_viewer_script = os.path.join(src_dir, 'scripts', 'query_viewer.py')
-    hmi_display_script = os.path.join(src_dir, 'scripts', 'hmi_display.py')
-    rviz_config = os.path.join(src_dir, 'config', 'cloudguessr.rviz')
+    default_map_vis = os.path.join(data_dir, 'campus_q16.pcd')
+    default_map_score = os.path.join(data_dir, 'campus_q8.pcd')
+    default_rounds_dir = os.path.join(data_dir, 'rounds')
+    query_viewer_script = os.path.join(scripts_dir, 'query_viewer.py')
+    hmi_display_script = os.path.join(scripts_dir, 'hmi_display.py')
+    desktop_gui_script = os.path.join(scripts_dir, 'cloudguessr_gui.py')
+    rviz_config = os.path.join(config_dir, 'cloudguessr.rviz')
+
+    ui_mode_arg = DeclareLaunchArgument(
+        'ui_mode',
+        default_value='desktop_gui',
+        description="UI mode: rviz | desktop_gui | hybrid"
+    )
 
     # Launch arguments
     map_vis_arg = DeclareLaunchArgument(
@@ -70,6 +83,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'map_file': LaunchConfiguration('map_score'),
+            'map_frame': 'map',
             'rounds_dir': LaunchConfiguration('rounds_dir'),
             'roi_radius': 20.0,
             'voxel_size': 0.5,
@@ -77,6 +91,9 @@ def generate_launch_description():
             'icp_max_corr_dist': 2.0,
             'fail_min_fitness': 0.3,
             'fail_max_rmse': 2.0,
+            'yaw_candidates_deg': [0, 45, 90, 135, 180, 225, 270, 315],
+            'use_xy_distance': True,
+            'click_debounce_ms': 300,
             'auto_advance': False,
             'result_display_sec': 5.0,
         }]
@@ -84,24 +101,24 @@ def generate_launch_description():
 
     # Query Viewer (Python script with Open3D)
     query_viewer = ExecuteProcess(
-        cmd=['python3', query_viewer_script],
+        cmd=[py_exec, query_viewer_script],
         name='query_viewer',
         output='screen',
     )
 
-    # HMI Display (별도 터미널에서 실행)
-    venv_activate = os.path.join(pkg_dir, '..', '..', '..', '..', '.venv', 'bin', 'activate')
+    # HMI Display
     hmi_display = ExecuteProcess(
-        cmd=[
-            'gnome-terminal', '--title=CloudGuessr HMI', '--geometry=60x35',
-            '--', 'bash', '-c',
-            f'source /opt/ros/humble/setup.bash && '
-            f'source {os.path.join(pkg_dir, "..", "..", "..", "..", "install", "setup.bash")} && '
-            f'source {venv_activate} && '
-            f'python3 {hmi_display_script}; exec bash'
-        ],
+        cmd=[py_exec, hmi_display_script],
         name='hmi_display',
         output='screen',
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('ui_mode'), "' in ['rviz', 'hybrid']"])),
+    )
+
+    desktop_gui = ExecuteProcess(
+        cmd=[py_exec, desktop_gui_script],
+        name='desktop_gui',
+        output='screen',
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('ui_mode'), "' in ['desktop_gui', 'hybrid']"])),
     )
 
     # RViz
@@ -111,9 +128,11 @@ def generate_launch_description():
         name='rviz2',
         arguments=['-d', rviz_config] if os.path.exists(rviz_config) else [],
         output='screen',
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('ui_mode'), "' in ['rviz', 'hybrid']"])),
     )
 
     return LaunchDescription([
+        ui_mode_arg,
         map_vis_arg,
         map_score_arg,
         rounds_dir_arg,
@@ -121,5 +140,6 @@ def generate_launch_description():
         round_manager_node,
         query_viewer,
         hmi_display,
+        desktop_gui,
         rviz_node,
     ])

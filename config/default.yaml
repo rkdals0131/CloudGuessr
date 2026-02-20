@@ -25,6 +25,7 @@ icp_max_corr_dist: 2.0  # meters
 # Failure thresholds
 fail_min_fitness: 0.3
 fail_max_rmse: 2.0
+use_xy_distance: true
 
 # Debounce/timeout (milliseconds)
 click_debounce_ms: 300
