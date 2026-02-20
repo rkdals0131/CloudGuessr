@@ -260,9 +260,9 @@ private:
   void onClickedPoint(const geometry_msgs::msg::PointStamped::SharedPtr msg)
   {
     if (state_ == GameState::SHOWING_RESULT) {
-      // 결과 표시 중 클릭 → 다음 라운드로
-      RCLCPP_INFO(this->get_logger(), "[안내] 다음 라운드로 이동합니다...");
-      loadRound(current_round_idx_ + 1);
+      // 결과 표시 중 클릭은 무시 (다음 라운드는 명시적 명령으로만 진행)
+      (void)msg;
+      RCLCPP_WARN(this->get_logger(), "[대기] 결과 확인 중입니다. next_round 명령으로 다음 라운드를 시작하세요.");
       return;
     }
 
@@ -372,7 +372,7 @@ private:
     state_ = GameState::SHOWING_RESULT;
 
     RCLCPP_INFO(this->get_logger(), "");
-    RCLCPP_INFO(this->get_logger(), "▶ 맵을 다시 클릭하면 다음 라운드로 넘어갑니다");
+    RCLCPP_INFO(this->get_logger(), "▶ 다음 라운드는 Game Console의 Next Round 버튼으로 진행하세요");
     RCLCPP_INFO(this->get_logger(), "────────────────────────────────────────");
 
     // Auto advance
@@ -454,7 +454,7 @@ private:
       RCLCPP_INFO(this->get_logger(), "[결과] 많이 멀었네요. 다음 라운드에 도전하세요!");
       hmiLog("많이 멀었네요. 다음 라운드에 도전하세요!");
     }
-    hmiLog("맵을 다시 클릭하면 다음 라운드로 이동합니다.");
+    hmiLog("다음 라운드는 Game Console의 Next Round 버튼으로 진행하세요.");
   }
 
   void publishFailResult(const std::string & reason, double x, double y, double z)
@@ -480,8 +480,8 @@ private:
 
     state_ = GameState::SHOWING_RESULT;
 
-    RCLCPP_INFO(this->get_logger(), "▶ 맵을 다시 클릭하면 다음 라운드로 넘어갑니다");
-    hmiLog("맵을 다시 클릭하면 다음 라운드로 이동합니다.");
+    RCLCPP_INFO(this->get_logger(), "▶ 다음 라운드는 Game Console의 Next Round 버튼으로 진행하세요");
+    hmiLog("다음 라운드는 Game Console의 Next Round 버튼으로 진행하세요.");
   }
 
   void publishMarkers(const std::vector<double> & clicked, const std::vector<double> & gt)

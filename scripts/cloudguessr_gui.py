@@ -36,6 +36,7 @@ class CloudGuessrGuiNode(Node):
     def __init__(self, bridge: RosBridge):
         super().__init__("cloudguessr_gui")
         self.bridge = bridge
+        self.map_received_once = False
 
         self.clicked_pub = self.create_publisher(PointStamped, "/clicked_point", 10)
         self.command_pub = self.create_publisher(String, "/cloudguessr/command", 10)
@@ -50,9 +51,14 @@ class CloudGuessrGuiNode(Node):
         self.get_logger().info("CloudGuessr desktop GUI node started")
 
     def on_map(self, msg: PointCloud2):
-        map_points = self._sample_cloud(msg, max_render_points=30000)
+        # /cloudguessr/map is periodically republished by map_server.
+        # Apply only the first full map in GUI to avoid repeated heavy re-caching.
+        if self.map_received_once:
+            return
+        map_points = self._sample_cloud(msg, max_render_points=150000)
         if map_points is None:
             return
+        self.map_received_once = True
         self.bridge.map_ready.emit(map_points)
 
     def on_aligned_query(self, msg: PointCloud2):
@@ -125,6 +131,10 @@ class MapCanvas(QtWidgets.QWidget):
         self.pan_y = 0.0
         self.is_panning = False
         self.last_pan_pos = QtCore.QPointF()
+        self.map_base_poly = None
+        self.aligned_base_poly = None
+        self.map_poly_dirty = True
+        self.aligned_poly_dirty = True
 
     def set_map_points(self, points: np.ndarray):
         self.map_points = points
@@ -144,6 +154,8 @@ class MapCanvas(QtWidgets.QWidget):
             self.reset_view()
         else:
             self.bounds = next_bounds
+        self.map_poly_dirty = True
+        self.aligned_poly_dirty = True
         self.update()
 
     def set_result_points(self, clicked_xyz, gt_xyz):
@@ -155,6 +167,7 @@ class MapCanvas(QtWidgets.QWidget):
 
     def set_aligned_points(self, points: np.ndarray):
         self.aligned_points = points
+        self.aligned_poly_dirty = True
         self.update()
 
     def clear_round_visuals(self, clear_aligned: bool):
@@ -162,6 +175,8 @@ class MapCanvas(QtWidgets.QWidget):
         self.gt_point = None
         if clear_aligned:
             self.aligned_points = None
+            self.aligned_base_poly = None
+            self.aligned_poly_dirty = False
         self.update()
 
     def reset_view(self):
@@ -232,27 +247,39 @@ class MapCanvas(QtWidgets.QWidget):
         self.update()
         event.accept()
 
+    def resizeEvent(self, event: QtGui.QResizeEvent):
+        self.map_poly_dirty = True
+        self.aligned_poly_dirty = True
+        super().resizeEvent(event)
+
     def paintEvent(self, event):
         del event
         painter = QtGui.QPainter(self)
         painter.fillRect(self.rect(), QtGui.QColor(20, 24, 30))
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
 
         if self.map_points is None or self.bounds is None:
             painter.setPen(QtGui.QColor(190, 200, 215))
             painter.drawText(self.rect(), QtCore.Qt.AlignCenter, "Waiting for /cloudguessr/map ...")
             return
 
-        painter.setPen(QtGui.QPen(QtGui.QColor(115, 130, 145), 1))
-        for p in self.map_points:
-            sx, sy = self._world_to_screen(float(p[0]), float(p[1]))
-            painter.drawPoint(QtCore.QPointF(sx, sy))
-
-        if self.aligned_points is not None:
-            painter.setPen(QtGui.QPen(QtGui.QColor(70, 230, 220), 1))
-            for p in self.aligned_points:
-                sx, sy = self._world_to_screen(float(p[0]), float(p[1]))
-                painter.drawPoint(QtCore.QPointF(sx, sy))
+        self._ensure_map_poly()
+        self._ensure_aligned_poly()
+        painter.save()
+        self._apply_view_transform(painter)
+        if self.map_base_poly is not None:
+            map_pen = QtGui.QPen(QtGui.QColor(115, 130, 145))
+            map_pen.setWidth(0)  # cosmetic pen for crisp zoomed rendering
+            painter.setPen(map_pen)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+            painter.drawPoints(self.map_base_poly)
+        if self.aligned_base_poly is not None:
+            aligned_pen = QtGui.QPen(QtGui.QColor(70, 230, 220))
+            aligned_pen.setWidth(0)  # cosmetic pen for crisp zoomed rendering
+            painter.setPen(aligned_pen)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+            painter.drawPoints(self.aligned_base_poly)
+        painter.restore()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
 
         if self.clicked_point and self.gt_point:
             c_sx, c_sy = self._world_to_screen(*self.clicked_point)
@@ -280,6 +307,13 @@ class MapCanvas(QtWidgets.QWidget):
         )
 
     def _world_to_screen(self, x: float, y: float):
+        sx, sy = self._world_to_base_screen(x, y)
+        cx, cy = self._viewport_center()
+        sx = cx + (sx - cx) * self.zoom + self.pan_x
+        sy = cy + (sy - cy) * self.zoom + self.pan_y
+        return sx, sy
+
+    def _world_to_base_screen(self, x: float, y: float):
         min_x, max_x, min_y, max_y = self.bounds
         margin = 24.0
         w = max(1.0, self.width() - 2.0 * margin)
@@ -289,9 +323,6 @@ class MapCanvas(QtWidgets.QWidget):
         ny = (y - min_y) / (max_y - min_y)
         sx = margin + nx * w
         sy = margin + (1.0 - ny) * h
-        cx, cy = self._viewport_center()
-        sx = cx + (sx - cx) * self.zoom + self.pan_x
-        sy = cy + (sy - cy) * self.zoom + self.pan_y
         return sx, sy
 
     def _screen_to_world(self, pos: QtCore.QPointF):
@@ -315,6 +346,46 @@ class MapCanvas(QtWidgets.QWidget):
 
     def _viewport_center(self):
         return self.width() * 0.5, self.height() * 0.5
+
+    def _apply_view_transform(self, painter: QtGui.QPainter):
+        cx, cy = self._viewport_center()
+        painter.translate(cx + self.pan_x, cy + self.pan_y)
+        painter.scale(self.zoom, self.zoom)
+        painter.translate(-cx, -cy)
+
+    def _ensure_map_poly(self):
+        if self.map_points is None or self.bounds is None:
+            self.map_base_poly = None
+            self.map_poly_dirty = False
+            return
+        if not self.map_poly_dirty and self.map_base_poly is not None:
+            return
+        self.map_base_poly = self._build_base_poly(self.map_points)
+        self.map_poly_dirty = False
+
+    def _ensure_aligned_poly(self):
+        if self.aligned_points is None or self.bounds is None:
+            self.aligned_base_poly = None
+            self.aligned_poly_dirty = False
+            return
+        if not self.aligned_poly_dirty and self.aligned_base_poly is not None:
+            return
+        self.aligned_base_poly = self._build_base_poly(self.aligned_points)
+        self.aligned_poly_dirty = False
+
+    def _build_base_poly(self, points: np.ndarray):
+        min_x, max_x, min_y, max_y = self.bounds
+        margin = 24.0
+        w = max(1.0, self.width() - 2.0 * margin)
+        h = max(1.0, self.height() - 2.0 * margin)
+
+        xs = points[:, 0].astype(np.float64, copy=False)
+        ys = points[:, 1].astype(np.float64, copy=False)
+        nx = (xs - min_x) / (max_x - min_x)
+        ny = (ys - min_y) / (max_y - min_y)
+        sx = margin + nx * w
+        sy = margin + (1.0 - ny) * h
+        return QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in zip(sx, sy)])
 
     def _bounds_changed(self, next_bounds):
         if self.bounds is None:
@@ -663,8 +734,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(float, float)
     def on_map_clicked(self, x: float, y: float):
-        if self.current_state == 'SCORING':
-            self.append_log('ignored click while SCORING')
+        if self.current_state != 'WAITING_CLICK':
+            self.append_log(f'ignored click while {self.current_state}')
             return
 
         z = 0.0
