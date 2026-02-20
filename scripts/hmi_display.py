@@ -33,6 +33,11 @@ class HMIDisplay(Node):
         # Last result
         self.last_score = 0
         self.last_status = ""
+        self.last_dist_error = None
+        self.last_quality_pct = None
+        self.last_rmse = None
+        self.last_elapsed_ms = None
+        self.last_comment = "-"
 
         # Log messages (최근 15개)
         self.log_messages = deque(maxlen=15)
@@ -60,6 +65,33 @@ class HMIDisplay(Node):
             data = json.loads(msg.data)
             self.last_score = data.get('score', 0)
             self.last_status = data.get('status', '')
+            self.last_dist_error = data.get('dist_error_m')
+            self.last_rmse = data.get('rmse')
+            self.last_elapsed_ms = data.get('elapsed_ms')
+
+            quality_pct = data.get('quality_pct')
+            fitness = data.get('fitness')
+            if quality_pct is not None:
+                self.last_quality_pct = float(quality_pct)
+            elif fitness is not None:
+                self.last_quality_pct = float(fitness) * 100.0
+            else:
+                self.last_quality_pct = None
+
+            comment = str(data.get('comment', '') or '').strip()
+            if not comment:
+                reason = data.get('reason', '')
+                if self.last_status != 'OK':
+                    comment = f'실패: {reason}' if reason else '정합 실패'
+                elif self.last_score >= 4000:
+                    comment = '훌륭합니다! 거의 정확한 위치입니다!'
+                elif self.last_score >= 2500:
+                    comment = '좋습니다! 꽤 가까운 위치입니다.'
+                elif self.last_score >= 1000:
+                    comment = '아쉽네요. 조금 멀었습니다.'
+                else:
+                    comment = '많이 멀었네요. 다음 라운드에 도전하세요!'
+            self.last_comment = comment
         except json.JSONDecodeError:
             pass
 
@@ -72,6 +104,7 @@ class HMIDisplay(Node):
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="status", size=5),
+            Layout(name="result", size=8),
             Layout(name="logs", ratio=1),
         )
         return layout
@@ -142,10 +175,57 @@ class HMIDisplay(Node):
             border_style="cyan",
         )
 
+    def render_result(self) -> Panel:
+        table = Table(show_header=False, box=None, expand=True)
+        table.add_column(justify="left", ratio=1)
+        table.add_column(justify="left", ratio=1)
+
+        if self.last_status == "OK":
+            if self.last_score >= 4000:
+                score_style = "bold green"
+            elif self.last_score >= 2000:
+                score_style = "bold yellow"
+            else:
+                score_style = "bold red"
+        elif self.last_status == "FAIL":
+            score_style = "bold red"
+        else:
+            score_style = "dim"
+
+        dist_text = "-"
+        if self.last_dist_error is not None:
+            dist_text = f"{float(self.last_dist_error):.2f} m"
+
+        quality_text = "-"
+        if self.last_quality_pct is not None:
+            quality_text = f"{float(self.last_quality_pct):.1f}%"
+            if self.last_rmse is not None:
+                quality_text += f" / RMSE {float(self.last_rmse):.3f}"
+
+        elapsed_text = "-"
+        if self.last_elapsed_ms is not None:
+            elapsed_text = f"{float(self.last_elapsed_ms):.0f} ms"
+
+        table.add_row(
+            f"[bold]점수[/]\n[{score_style}]{self.last_score}[/]",
+            f"[bold]거리 오차[/]\n[white]{dist_text}[/]",
+        )
+        table.add_row(
+            f"[bold]정합 품질[/]\n[white]{quality_text}[/]",
+            f"[bold]처리 시간[/]\n[white]{elapsed_text}[/]",
+        )
+        table.add_row(
+            f"[bold]멘트[/]\n[white]{self.last_comment}[/]",
+            "",
+        )
+
+        return Panel(table, title="[bold]Last Result[/]", border_style="magenta")
+
     def render(self) -> Layout:
         layout = self.make_layout()
         layout["header"].update(self.render_header())
         layout["status"].update(self.render_status())
+        layout["result"].update(self.render_result())
         layout["logs"].update(self.render_logs())
         return layout
 

@@ -399,6 +399,19 @@ private:
     score_msg.data = score_result.score;
     score_pub_->publish(score_msg);
 
+    std::string comment;
+    if (score_result.status != "OK") {
+      comment = "실패: " + score_result.reason;
+    } else if (score_result.score >= 4000) {
+      comment = "훌륭합니다! 거의 정확한 위치입니다!";
+    } else if (score_result.score >= 2500) {
+      comment = "좋습니다! 꽤 가까운 위치입니다.";
+    } else if (score_result.score >= 1000) {
+      comment = "아쉽네요. 조금 멀었습니다.";
+    } else {
+      comment = "많이 멀었네요. 다음 라운드에 도전하세요!";
+    }
+
     // JSON result
     json result_json;
     result_json["round_id"] = current_meta_.round_id;
@@ -412,6 +425,8 @@ private:
     result_json["elapsed_ms"] = elapsed_ms;
     result_json["status"] = score_result.status;
     result_json["reason"] = score_result.reason;
+    result_json["quality_pct"] = sweep_result.best_alignment.fitness * 100.0;
+    result_json["comment"] = comment;
 
     std_msgs::msg::String result_msg;
     result_msg.data = result_json.dump();
@@ -437,23 +452,12 @@ private:
       "점수: %d점 | 거리 오차: %.1fm | 정합 품질: %.1f%%",
       score_result.score, dist_error, sweep_result.best_alignment.fitness * 100);
     hmiLog(score_buf);
-
     if (score_result.status != "OK") {
-      RCLCPP_WARN(this->get_logger(), "[결과] 실패 - %s", score_result.reason.c_str());
-      hmiLog("실패: " + score_result.reason);
-    } else if (score_result.score >= 4000) {
-      RCLCPP_INFO(this->get_logger(), "[결과] 훌륭합니다! 거의 정확한 위치입니다!");
-      hmiLog("훌륭합니다! 거의 정확한 위치입니다!");
-    } else if (score_result.score >= 2500) {
-      RCLCPP_INFO(this->get_logger(), "[결과] 좋습니다! 꽤 가까운 위치입니다.");
-      hmiLog("좋습니다! 꽤 가까운 위치입니다.");
-    } else if (score_result.score >= 1000) {
-      RCLCPP_INFO(this->get_logger(), "[결과] 아쉽네요. 조금 멀었습니다.");
-      hmiLog("아쉽네요. 조금 멀었습니다.");
+      RCLCPP_WARN(this->get_logger(), "[결과] %s", comment.c_str());
     } else {
-      RCLCPP_INFO(this->get_logger(), "[결과] 많이 멀었네요. 다음 라운드에 도전하세요!");
-      hmiLog("많이 멀었네요. 다음 라운드에 도전하세요!");
+      RCLCPP_INFO(this->get_logger(), "[결과] %s", comment.c_str());
     }
+    hmiLog(comment);
     hmiLog("다음 라운드는 Game Console의 Next Round 버튼으로 진행하세요.");
   }
 
@@ -470,9 +474,15 @@ private:
     result_json["round_id"] = current_meta_.round_id;
     result_json["clicked_xyz"] = {x, y, z};
     result_json["gt_xyz"] = {current_meta_.gt_x, current_meta_.gt_y, current_meta_.gt_z};
+    result_json["dist_error_m"] = nullptr;
+    result_json["fitness"] = nullptr;
+    result_json["rmse"] = nullptr;
+    result_json["elapsed_ms"] = nullptr;
+    result_json["quality_pct"] = nullptr;
     result_json["score"] = 0;
     result_json["status"] = "FAIL";
     result_json["reason"] = reason;
+    result_json["comment"] = "실패: " + reason;
 
     std_msgs::msg::String result_msg;
     result_msg.data = result_json.dump();

@@ -135,6 +135,7 @@ class MapCanvas(QtWidgets.QWidget):
         self.aligned_base_poly = None
         self.map_poly_dirty = True
         self.aligned_poly_dirty = True
+        self.overlay_data = None
 
     def set_map_points(self, points: np.ndarray):
         self.map_points = points
@@ -177,6 +178,7 @@ class MapCanvas(QtWidgets.QWidget):
             self.aligned_points = None
             self.aligned_base_poly = None
             self.aligned_poly_dirty = False
+        self.clear_result_overlay()
         self.update()
 
     def reset_view(self):
@@ -299,6 +301,9 @@ class MapCanvas(QtWidgets.QWidget):
             painter.setPen(QtCore.Qt.NoPen)
             painter.drawEllipse(QtCore.QPointF(g_sx, g_sy), 6, 6)
 
+        if self.overlay_data is not None:
+            self._draw_result_overlay(painter)
+
         painter.setPen(QtGui.QColor(160, 180, 205))
         painter.drawText(
             QtCore.QRectF(18, 12, self.width() - 36, 28),
@@ -386,6 +391,118 @@ class MapCanvas(QtWidgets.QWidget):
         sx = margin + nx * w
         sy = margin + (1.0 - ny) * h
         return QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in zip(sx, sy)])
+
+    def set_result_overlay(
+        self,
+        score: int,
+        status: str,
+        dist_error,
+        quality_pct,
+        fitness,
+        rmse,
+        comment: str,
+    ):
+        self.overlay_data = {
+            'score': int(score),
+            'status': str(status),
+            'dist_error': dist_error,
+            'quality_pct': quality_pct,
+            'fitness': fitness,
+            'rmse': rmse,
+            'comment': str(comment or ''),
+        }
+        self.update()
+
+    def clear_result_overlay(self):
+        self.overlay_data = None
+        self.update()
+
+    def _draw_result_overlay(self, painter: QtGui.QPainter):
+        data = self.overlay_data
+        if data is None:
+            return
+
+        panel_w = min(620.0, max(320.0, self.width() - 48.0))
+        panel_h = 168.0
+        panel_x = 24.0
+        panel_y = 52.0
+        panel_rect = QtCore.QRectF(panel_x, panel_y, panel_w, panel_h)
+
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setBrush(QtGui.QColor(8, 14, 22, 220))
+        painter.setPen(QtGui.QPen(QtGui.QColor(58, 78, 102), 1.2))
+        painter.drawRoundedRect(panel_rect, 12.0, 12.0)
+
+        score = int(data['score'])
+        status = data['status']
+        if status == 'FAIL':
+            score_color = QtGui.QColor(255, 140, 140)
+        elif score >= 4000:
+            score_color = QtGui.QColor(110, 243, 169)
+        elif score >= 2000:
+            score_color = QtGui.QColor(255, 213, 122)
+        else:
+            score_color = QtGui.QColor(255, 177, 115)
+
+        score_font = QtGui.QFont()
+        score_font.setPointSize(30)
+        score_font.setBold(True)
+        painter.setFont(score_font)
+        painter.setPen(QtGui.QPen(score_color))
+        score_text = f'SCORE {score}'
+        if status == 'FAIL':
+            score_text += ' (FAIL)'
+        painter.drawText(
+            QtCore.QRectF(panel_x + 16.0, panel_y + 10.0, panel_w - 32.0, 46.0),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            score_text,
+        )
+
+        detail_font = QtGui.QFont()
+        detail_font.setPointSize(11)
+        painter.setFont(detail_font)
+        painter.setPen(QtGui.QColor(216, 229, 244))
+
+        dist_error = data['dist_error']
+        if dist_error is None:
+            dist_text = '거리 오차: -'
+        else:
+            dist_text = f'거리 오차: {float(dist_error):.2f} m'
+
+        quality_pct = data['quality_pct']
+        fitness = data['fitness']
+        rmse = data['rmse']
+        if quality_pct is not None:
+            quality_text = f'정합 품질: {float(quality_pct):.1f}%'
+        elif fitness is not None:
+            quality_text = f'정합 품질: {float(fitness) * 100.0:.1f}%'
+        else:
+            quality_text = '정합 품질: -'
+        if rmse is not None:
+            quality_text += f' (RMSE {float(rmse):.3f})'
+
+        painter.drawText(
+            QtCore.QRectF(panel_x + 18.0, panel_y + 66.0, panel_w - 36.0, 24.0),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            dist_text,
+        )
+        painter.drawText(
+            QtCore.QRectF(panel_x + 18.0, panel_y + 90.0, panel_w - 36.0, 24.0),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            quality_text,
+        )
+
+        comment = str(data['comment'] or '').strip()
+        if not comment:
+            comment = '다음 라운드에 도전하세요!'
+        painter.setPen(QtGui.QColor(245, 250, 255))
+        painter.drawText(
+            QtCore.QRectF(panel_x + 18.0, panel_y + 116.0, panel_w - 36.0, 44.0),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
+            f'멘트: {comment}',
+        )
+        painter.restore()
 
     def _bounds_changed(self, next_bounds):
         if self.bounds is None:
@@ -567,26 +684,24 @@ class MainWindow(QtWidgets.QMainWindow):
         score_title.setObjectName('metricTitle')
         self.score_label = QtWidgets.QLabel('0')
         self.score_label.setObjectName('scoreValue')
-        self.result_status = QtWidgets.QLabel('Status: -')
-        self.result_status.setObjectName('hint')
-        self.error_label = QtWidgets.QLabel('Distance Error: -')
-        self.error_label.setObjectName('hint')
-        self.quality_label = QtWidgets.QLabel('Fitness / RMSE: -')
+        self.distance_label = QtWidgets.QLabel('거리 오차: -')
+        self.distance_label.setObjectName('hint')
+        self.quality_label = QtWidgets.QLabel('정합 품질: -')
         self.quality_label.setObjectName('hint')
-        self.reason_label = QtWidgets.QLabel('Reason: -')
-        self.reason_label.setObjectName('hint')
-        self.last_click_label = QtWidgets.QLabel('Last Click: -')
-        self.last_click_label.setObjectName('hint')
-        self.summary_label = QtWidgets.QLabel('Summary: -')
-        self.summary_label.setObjectName('hint')
+        self.elapsed_label = QtWidgets.QLabel('처리 시간: -')
+        self.elapsed_label.setObjectName('hint')
+        self.comment_label = QtWidgets.QLabel('멘트: 라운드를 시작하세요.')
+        self.comment_label.setObjectName('hint')
+        self.comment_label.setWordWrap(True)
+        self.next_hint_label = QtWidgets.QLabel('결과 확인 후 Next Round 버튼으로 진행')
+        self.next_hint_label.setObjectName('hint')
         score_layout.addWidget(score_title)
         score_layout.addWidget(self.score_label)
-        score_layout.addWidget(self.result_status)
-        score_layout.addWidget(self.error_label)
+        score_layout.addWidget(self.distance_label)
         score_layout.addWidget(self.quality_label)
-        score_layout.addWidget(self.reason_label)
-        score_layout.addWidget(self.last_click_label)
-        score_layout.addWidget(self.summary_label)
+        score_layout.addWidget(self.elapsed_label)
+        score_layout.addWidget(self.comment_label)
+        score_layout.addWidget(self.next_hint_label)
         right_layout.addWidget(score_card)
 
         control_card = QtWidgets.QFrame()
@@ -620,6 +735,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.query_ready.connect(self.on_query_ready)
         self.bridge.aligned_ready.connect(self.on_aligned_ready)
         self.bridge.log_ready.connect(self.append_log)
+        self._reset_score_panel()
+
+    def _reset_score_panel(self):
+        self.score_label.setText('0')
+        self.score_label.setStyleSheet('color: #6df3a9; font-size: 42px; font-weight: 700;')
+        self.distance_label.setText('거리 오차: -')
+        self.quality_label.setText('정합 품질: -')
+        self.elapsed_label.setText('처리 시간: -')
+        self.comment_label.setText('멘트: 라운드를 시작하세요.')
+        self.next_hint_label.setText('결과 확인 후 Next Round 버튼으로 진행')
+        self.canvas.clear_result_overlay()
 
     @QtCore.Slot(object)
     def on_map_ready(self, points):
@@ -654,6 +780,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if round_idx_zero != self.current_round_idx:
             self.current_round_idx = round_idx_zero
             self.canvas.clear_round_visuals(clear_aligned=True)
+            self._reset_score_panel()
             note_text = notes if notes else '-'
             self.append_log(
                 f'round {round_idx}/{total_rounds} | id={round_id} | '
@@ -661,6 +788,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elif state == 'WAITING_CLICK' and prev_state != 'WAITING_CLICK':
             self.canvas.clear_round_visuals(clear_aligned=True)
+            self._reset_score_panel()
 
         state_color = {
             'IDLE': '#9fb2c7',
@@ -680,9 +808,24 @@ class MainWindow(QtWidgets.QMainWindow):
         score = int(result.get('score', 0))
         status = result.get('status', '-')
         dist_error = result.get('dist_error_m')
+        quality_pct = result.get('quality_pct')
         fitness = result.get('fitness')
         rmse = result.get('rmse')
+        elapsed_ms = result.get('elapsed_ms')
         reason = result.get('reason', '')
+        comment = str(result.get('comment', '') or '').strip()
+
+        if not comment:
+            if status != 'OK':
+                comment = f'실패: {reason}' if reason else '정합 실패'
+            elif score >= 4000:
+                comment = '훌륭합니다! 거의 정확한 위치입니다!'
+            elif score >= 2500:
+                comment = '좋습니다! 꽤 가까운 위치입니다.'
+            elif score >= 1000:
+                comment = '아쉽네요. 조금 멀었습니다.'
+            else:
+                comment = '많이 멀었네요. 다음 라운드에 도전하세요!'
 
         self.score_label.setText(str(score))
         if status == 'FAIL':
@@ -694,33 +837,48 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.score_label.setStyleSheet('color: #ffb173; font-size: 42px; font-weight: 700;')
 
-        self.result_status.setText(f'Status: {status}')
         if dist_error is not None:
-            self.error_label.setText(f'Distance Error: {float(dist_error):.2f} m')
+            self.distance_label.setText(f'거리 오차: {float(dist_error):.2f} m')
         else:
-            self.error_label.setText('Distance Error: -')
+            self.distance_label.setText('거리 오차: -')
 
-        if fitness is not None and rmse is not None:
-            self.quality_label.setText(f'Fitness / RMSE: {float(fitness):.3f} / {float(rmse):.3f}')
+        if quality_pct is not None:
+            quality_text = f'정합 품질: {float(quality_pct):.1f}%'
+            if rmse is not None:
+                quality_text += f' (RMSE {float(rmse):.3f})'
+            self.quality_label.setText(quality_text)
+        elif fitness is not None:
+            quality_text = f'정합 품질: {float(fitness) * 100.0:.1f}%'
+            if rmse is not None:
+                quality_text += f' (RMSE {float(rmse):.3f})'
+            self.quality_label.setText(quality_text)
         else:
-            self.quality_label.setText('Fitness / RMSE: -')
+            self.quality_label.setText('정합 품질: -')
 
-        if reason:
-            self.reason_label.setText(f'Reason: {reason}')
+        if elapsed_ms is not None:
+            self.elapsed_label.setText(f'처리 시간: {float(elapsed_ms):.0f} ms')
         else:
-            self.reason_label.setText('Reason: -')
+            self.elapsed_label.setText('처리 시간: -')
+
+        self.comment_label.setText(f'멘트: {comment}')
+        self.next_hint_label.setText('Next Round 버튼으로 다음 문제로 이동')
 
         clicked = result.get('clicked_xyz')
         gt = result.get('gt_xyz')
         self.canvas.set_result_points(clicked, gt)
-        if dist_error is not None and fitness is not None and rmse is not None:
-            self.summary_label.setText(
-                f'Summary: score={score}, err={float(dist_error):.2f}m, '
-                f'fit={float(fitness):.3f}, rmse={float(rmse):.3f}'
-            )
-        else:
-            self.summary_label.setText(f'Summary: score={score}, status={status}')
-        self.append_log(f'result score={score}, status={status}')
+        self.canvas.set_result_overlay(
+            score=score,
+            status=status,
+            dist_error=dist_error,
+            quality_pct=quality_pct,
+            fitness=fitness,
+            rmse=rmse,
+            comment=comment,
+        )
+        self.append_log(
+            f'result score={score}, status={status}, dist={dist_error}, '
+            f'quality={quality_pct if quality_pct is not None else fitness}, comment={comment}'
+        )
 
     @QtCore.Slot(int)
     def on_query_ready(self, count):
@@ -746,7 +904,6 @@ class MainWindow(QtWidgets.QMainWindow):
             z = float(self.map_points[idx, 2])
 
         self.node.publish_click(x, y, z)
-        self.last_click_label.setText(f'Last Click: ({x:.2f}, {y:.2f}, {z:.2f})')
         self.append_log(f'clicked ({x:.2f}, {y:.2f}, {z:.2f}) -> published /clicked_point')
 
     @QtCore.Slot(str)
