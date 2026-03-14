@@ -60,3 +60,5 @@ COLCON_IGNORE
 
 # Point cloud data files
 data/
+
+.omx/

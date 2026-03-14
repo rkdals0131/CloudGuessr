@@ -28,9 +28,10 @@ def generate_launch_description():
     config_dir = os.path.join(pkg_dir, 'config')
 
     # Default paths
-    default_map_vis = os.path.join(data_dir, 'campus_q16.pcd')
+    default_map_vis = os.path.join(data_dir, 'campus_q32.pcd')
     default_map_score = os.path.join(data_dir, 'campus_q8.pcd')
     default_rounds_dir = os.path.join(data_dir, 'rounds')
+    default_params_file = os.path.join(config_dir, 'default.yaml')
     query_viewer_script = os.path.join(scripts_dir, 'query_viewer.py')
     hmi_display_script = os.path.join(scripts_dir, 'hmi_display.py')
     desktop_gui_script = os.path.join(scripts_dir, 'cloudguessr_gui.py')
@@ -40,6 +41,12 @@ def generate_launch_description():
         'ui_mode',
         default_value='desktop_gui',
         description="UI mode: rviz | desktop_gui | hybrid"
+    )
+
+    params_file_arg = DeclareLaunchArgument(
+        'params_file',
+        default_value=default_params_file,
+        description='ROS2 params YAML (loaded for map_server + round_manager)'
     )
 
     # Launch arguments
@@ -67,12 +74,10 @@ def generate_launch_description():
         executable='map_server_node',
         name='map_server',
         output='screen',
-        parameters=[{
-            'map_file': LaunchConfiguration('map_vis'),
-            'map_frame': 'map',
-            'voxel_size': 0.0,
-            'publish_rate': 0.5,
-        }]
+        parameters=[
+            LaunchConfiguration('params_file'),
+            {'map_file': LaunchConfiguration('map_vis')},
+        ]
     )
 
     # Round Manager Node
@@ -81,22 +86,13 @@ def generate_launch_description():
         executable='round_manager_node',
         name='round_manager',
         output='screen',
-        parameters=[{
-            'map_file': LaunchConfiguration('map_score'),
-            'map_frame': 'map',
-            'rounds_dir': LaunchConfiguration('rounds_dir'),
-            'roi_radius': 20.0,
-            'voxel_size': 0.5,
-            'icp_max_iter': 50,
-            'icp_max_corr_dist': 2.0,
-            'fail_min_fitness': 0.3,
-            'fail_max_rmse': 2.0,
-            'yaw_candidates_deg': [0, 45, 90, 135, 180, 225, 270, 315],
-            'use_xy_distance': True,
-            'click_debounce_ms': 300,
-            'auto_advance': False,
-            'result_display_sec': 5.0,
-        }]
+        parameters=[
+            LaunchConfiguration('params_file'),
+            {
+                'map_file': LaunchConfiguration('map_score'),
+                'rounds_dir': LaunchConfiguration('rounds_dir'),
+            },
+        ]
     )
 
     # Query Viewer (Python script with Open3D)
@@ -133,6 +129,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         ui_mode_arg,
+        params_file_arg,
         map_vis_arg,
         map_score_arg,
         rounds_dir_arg,

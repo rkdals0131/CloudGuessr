@@ -179,33 +179,33 @@ cloudguessr/
 
 ### 4.2 파라미터 계약(config/default.yaml)
 
-* `map_file_vis`: string
+`config/default.yaml`은 `cloudguessr.launch.py`에서 로드되는 **ROS2 params YAML**이며,
+실제 파일 경로(`map_file`, `rounds_dir`)는 launch arg로 주입된다.
 
-* `map_file_score`: string
+#### map_server 노드 파라미터
 
+* `map_file`: string (launch arg `map_vis`로 주입)
 * `map_frame`: string = "map"
+* `voxel_size`: double (표시용 다운샘플)
+* `publish_rate`: double (Hz)
 
-* `publish_latched`: bool = true
+#### round_manager 노드 파라미터
 
-* `rounds_dir`: string
-
-* `roi_radius_m_default`: double
-
+* `map_file`: string (launch arg `map_score`로 주입)
+* `rounds_dir`: string (launch arg `rounds_dir`로 주입)
+* `map_frame`: string = "map"
+* `roi_radius`: double
+* `voxel_size`: double
 * `yaw_candidates_deg`: int[] (예: [0,45,90,...,315])
-
-* `voxel_size_score`: double
-
 * `icp_max_iter`: int
-
 * `icp_max_corr_dist`: double
-
 * `fail_min_fitness`: double
-
 * `fail_max_rmse`: double
-
+* `use_xy_distance`: bool
 * `click_debounce_ms`: int (예: 300)
-
-* `score_timeout_ms`: int (예: 3000)
+* `auto_advance`: bool
+* `result_display_sec`: double
+* `score_*`: 점수 모델 파라미터(가중치/감쇠/포화 등)
 
 ### 4.3 라운드 데이터 계약(round.yaml)
 

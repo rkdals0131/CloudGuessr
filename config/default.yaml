@@ -1,32 +1,48 @@
-# CloudGuessr Default Configuration
+# CloudGuessr Default Parameters (ROS 2 params file)
+#
+# - This file is loaded by `launch/cloudguessr.launch.py`.
+# - Dataset paths (`map_file`, `rounds_dir`) are set by launch arguments:
+#     - map_vis  -> map_server.map_file
+#     - map_score -> round_manager.map_file
+#     - rounds_dir -> round_manager.rounds_dir
+#
+# If you change this file in `src/cloudguessr/config`, run `colcon build` again
+# (unless you are using `--symlink-install`).
 
-# Map files
-map_file_vis: "data/campus_q32.pcd"      # For RViz display (lower res)
-map_file_score: "data/campus_q8.pcd"     # For scoring (higher res)
-map_frame: "map"
-publish_latched: true
+map_server:
+  ros__parameters:
+    map_frame: map
+    voxel_size: 0.0
+    publish_rate: 0.5
 
-# Rounds
-rounds_dir: "data/rounds"
+round_manager:
+  ros__parameters:
+    map_frame: map
 
-# ROI settings
-roi_radius_m_default: 20.0
+    # ROI / preprocess
+    roi_radius: 20.0
+    voxel_size: 0.5
 
-# Yaw sweep candidates (degrees)
-yaw_candidates_deg: [0, 45, 90, 135, 180, 225, 270, 315]
+    # ICP
+    icp_max_iter: 50
+    icp_max_corr_dist: 2.0
+    yaw_candidates_deg: [0, 45, 90, 135, 180, 225, 270, 315]
 
-# Preprocessing
-voxel_size_score: 0.5   # meters
+    # FAIL thresholds
+    fail_min_fitness: 0.3
+    fail_max_rmse: 2.0
+    use_xy_distance: true
 
-# ICP settings
-icp_max_iter: 50
-icp_max_corr_dist: 2.0  # meters
+    # UX / control
+    click_debounce_ms: 300
+    auto_advance: false
+    result_display_sec: 5.0
 
-# Failure thresholds
-fail_min_fitness: 0.3
-fail_max_rmse: 2.0
-use_xy_distance: true
+    # Game score model
+    score_perfect_radius_m: 1.5
+    score_distance_decay_m: 55.0
+    score_distance_exp: 0.9
+    score_distance_weight: 0.82
+    score_quality_weight: 0.18
+    score_saturation_threshold: 0.975
 
-# Debounce/timeout (milliseconds)
-click_debounce_ms: 300
-score_timeout_ms: 3000

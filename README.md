@@ -7,9 +7,32 @@
 ```bash
 cd /home/user1/ROS2_Workspace/ros2_ws
 source .venv/bin/activate
-pip install PySide6
+pip install PySide6 open3d rich numpy pyyaml
 colcon build --packages-select cloudguessr
 ```
+
+## 데이터 준비(중요)
+
+GitHub에는 맵/라운드 데이터(`data/`)가 올라가지 않습니다(`.gitignore`).
+
+기본 launch는 **패키지 share 디렉토리** 기준으로 아래 경로를 기대합니다:
+
+```text
+cloudguessr/data/
+  campus_q32.pcd          # 시각화용 맵 (기본값: map_vis)
+  campus_q8.pcd           # 채점용 맵 (기본값: map_score)
+  rounds/
+    round_0001/
+      query.pcd (or .ply)
+      round.yaml
+    ...
+```
+
+로컬에서 가장 간단한 방법:
+1) `src/cloudguessr/data/`에 위 구조로 파일을 채운 뒤
+2) `colcon build --packages-select cloudguessr` 한 번 실행
+
+(launch는 `get_package_share_directory('cloudguessr')` 아래 `share/cloudguessr/data`를 사용합니다.)
 
 ## 테스트
 
@@ -41,6 +64,28 @@ ros2 launch cloudguessr cloudguessr.launch.py ui_mode:=hybrid
 
 # RViz + Open3D + HMI (디버그/레거시)
 ros2 launch cloudguessr cloudguessr.launch.py ui_mode:=rviz
+```
+
+### 데이터/경로를 직접 지정해서 실행하기
+
+데이터를 패키지 `data/` 아래에 두지 않는 경우, launch arg로 절대경로를 지정하면 됩니다:
+
+```bash
+ros2 launch cloudguessr cloudguessr.launch.py \
+  map_vis:=/abs/path/to/campus_q32.pcd \
+  map_score:=/abs/path/to/campus_q8.pcd \
+  rounds_dir:=/abs/path/to/rounds
+```
+
+### 파라미터(config) 일원화
+
+알고리즘/게임 파라미터는 `config/default.yaml`(ROS2 params 파일)에 모여 있고,
+`cloudguessr.launch.py`에서 자동으로 로드합니다.
+
+필요하면 별도 파일로 복사해서 `params_file:=...`로 바꿔 끼울 수 있습니다:
+
+```bash
+ros2 launch cloudguessr cloudguessr.launch.py params_file:=/abs/path/to/my_params.yaml
 ```
 
 ## 플레이 방법

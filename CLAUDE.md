@@ -70,12 +70,15 @@ Test data in `test/assets/` uses small deterministic point clouds, not full camp
 
 ## Configuration
 
-`config/default.yaml` contains all tunable parameters:
-- `roi_radius_m_default: 20.0` - ROI crop radius
-- `yaw_candidates_deg: [0, 45, 90, ...]` - Yaw sweep angles
-- `voxel_size_score: 0.5` - Downsampling voxel size
-- `icp_max_iter: 50`, `icp_max_corr_dist: 2.0` - ICP params
-- `fail_min_fitness: 0.3`, `fail_max_rmse: 2.0` - Failure thresholds
+`config/default.yaml` is a **ROS 2 params YAML** loaded by `launch/cloudguessr.launch.py`.
+
+Key tunables (under `round_manager.ros__parameters`):
+- `roi_radius: 20.0` - ROI crop radius (meters)
+- `yaw_candidates_deg: [0, 45, 90, ...]` - yaw sweep angles
+- `voxel_size: 0.5` - downsampling voxel size (meters)
+- `icp_max_iter`, `icp_max_corr_dist` - ICP parameters
+- `fail_min_fitness`, `fail_max_rmse` - FAIL thresholds
+- `score_*` - game scoring model parameters
 
 ## Round Data Format
 
